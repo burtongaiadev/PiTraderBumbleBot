@@ -1,24 +1,27 @@
 [Unit]
-Description=PiTrader Trading Bot
+Description=PiTrader - Bot de signaux trading
 After=network.target ollama.service
+Wants=ollama.service
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/PiTrader
-ExecStart=/usr/bin/python3 main.py --loop --interval 3600
+User=deer
+WorkingDirectory=/home/deer/PiTrader
+ExecStart=/usr/bin/python3 /home/deer/PiTrader/main.py --loop --interval 3600
 Restart=always
 RestartSec=60
-Environment=PYTHONUNBUFFERED=1
 
-# Limites ressources pour Pi
-MemoryMax=1G
+# Limites ressources pour Raspberry Pi
 CPUQuota=80%
+MemoryMax=1G
 
 # Logs
-StandardOutput=append:/home/pi/PiTrader/pitrader.log
-StandardError=append:/home/pi/PiTrader/pitrader.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pitrader
+
+# Variables d'environnement
+EnvironmentFile=/home/deer/PiTrader/.env
 
 [Install]
 WantedBy=multi-user.target
