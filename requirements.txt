@@ -7,9 +7,5 @@ requests>=2.31.0
 # Variables d'environnement
 python-dotenv>=1.0.0
 
-# Monitoring système (optionnel mais recommandé)
+# Monitoring système (optionnel)
 psutil>=5.9.0
-
-# Données financières (fallback pour indices et fondamentaux)
-# Note: yfinance 0.2.40 for Python 3.9 compatibility (3.10+ required for newer versions)
-yfinance>=0.2.30,<=0.2.40

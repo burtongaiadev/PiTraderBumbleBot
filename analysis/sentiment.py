@@ -191,7 +191,6 @@ class SentimentAnalyzer:
         results = []
 
         for i, symbol in enumerate(symbols):
-            logger.info(f"Analyzing sentiment {i+1}/{len(symbols)}: {symbol}")
             company = company_names.get(symbol)
             results.append(self.analyze(symbol, company))
 

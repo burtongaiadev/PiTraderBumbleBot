@@ -269,7 +269,7 @@ JSON:"""
 
         # Vérifier disponibilité Ollama
         if not self.is_available():
-            logger.warning("Ollama not available, using fallback")
+            logger.debug("Ollama not available, using fallback")
             return SentimentResult(
                 sentiment=self._fallback_sentiment(text),
                 confidence=0.3,
