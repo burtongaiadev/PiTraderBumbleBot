@@ -30,6 +30,7 @@ class SentimentScore:
     """Score de sentiment pour une action"""
     symbol: str
     total_score: float = 0.0  # 0-3
+    avg_confidence: float = 0.0  # 0.0 - 1.0, confiance moyenne Ollama
 
     # Détails
     articles_analyzed: int = 0
@@ -89,21 +90,28 @@ class SentimentAnalyzer:
                 score.is_valid = False
                 return score
 
-            # Analyser chaque article
-            sentiments = []
+            # Préparer les textes pour analyse batch
+            texts = []
             for article in news_result.articles:
-                if not article.title:
-                    continue
+                if article.title:
+                    score.headlines.append(article.title)
+                    text = f"{article.title}. {article.description or ''}"
+                    texts.append(text)
 
-                # Stocker headline
-                score.headlines.append(article.title)
+            if not texts:
+                score.error = "No valid articles"
+                score.is_valid = False
+                return score
 
-                # Analyser avec Ollama
-                text = f"{article.title}. {article.description or ''}"
-                result = ollama_client.analyze_sentiment(text)
+            # Analyser en batch (une seule requête Ollama)
+            results = ollama_client.analyze_sentiment_batch(texts)
 
+            sentiments = []
+            confidences = []
+            for result in results:
                 if result.is_valid:
                     sentiments.append(result.sentiment)
+                    confidences.append(result.confidence)
 
                     if result.sentiment == Sentiment.POSITIVE:
                         score.positive_count += 1
@@ -112,10 +120,9 @@ class SentimentAnalyzer:
                     else:
                         score.neutral_count += 1
 
-                # Pause thermique entre analyses Ollama
-                time.sleep(config.thermal.cooldown_delay)
-
             score.articles_analyzed = len(sentiments)
+            if confidences:
+                score.avg_confidence = sum(confidences) / len(confidences)
 
             if not sentiments:
                 score.error = "Could not analyze any articles"

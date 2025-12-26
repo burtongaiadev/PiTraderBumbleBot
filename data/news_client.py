@@ -19,10 +19,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import config
-from utils.decorators import retry_with_backoff
+from utils.decorators import retry_with_backoff, CircuitBreaker
 from utils.cache import ttl_lru_cache
 
 logger = logging.getLogger(__name__)
+
+# Circuit breaker pour NewsAPI
+_news_api_cb = CircuitBreaker(
+    failure_threshold=5,
+    recovery_timeout=120,
+    exceptions=(requests.RequestException, ConnectionError, TimeoutError, ValueError)
+)
 
 
 @dataclass
@@ -61,6 +68,7 @@ class NewsAPIClient:
         self.base_url = config.news_api.base_url
         self.timeout = config.news_api.timeout
 
+    @_news_api_cb
     @retry_with_backoff(
         exceptions=(requests.RequestException, ConnectionError, TimeoutError),
         max_retries=3,
@@ -84,6 +92,9 @@ class NewsAPIClient:
             response = requests.get(url, params=params, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
+            
+            query_info = params.get('q', 'unknown')
+            logger.debug(f"NewsAPI URL: {url}?q={query_info}")
 
             if data.get("status") != "ok":
                 raise ValueError(f"API Error: {data.get('message', 'Unknown')}")
@@ -123,13 +134,19 @@ class NewsAPIClient:
             # Calculer date de début
             from_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
-            data = self._request("everything", {
+            params = {
                 "q": query,
                 "language": language,
                 "sortBy": sort_by,
                 "pageSize": page_size,
                 "from": from_date
-            })
+            }
+
+            # Filtrer par sources financières fiables
+            if config.news_api.domains:
+                params["domains"] = config.news_api.domains
+
+            data = self._request("everything", params)
 
             articles = []
             for item in data.get("articles", []):
@@ -197,12 +214,16 @@ class NewsAPIClient:
 
         Args:
             symbol: Ticker (ex: AAPL)
-            company_name: Nom complet (ex: Apple)
+            company_name: Nom complet (ex: Apple) - auto-résolu depuis config si None
             page_size: Nombre d'articles
 
         Returns:
             NewsResult
         """
+        # Auto-résoudre le nom depuis le mapping si non fourni
+        if company_name is None:
+            company_name = config.ticker_names.get(symbol)
+
         # Construire requête
         if company_name:
             query = f'"{company_name}" OR {symbol}'

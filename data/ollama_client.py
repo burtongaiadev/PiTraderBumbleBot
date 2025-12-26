@@ -149,6 +149,9 @@ JSON:"""
             )
             response.raise_for_status()
             result = response.json()
+            
+            logger.debug(f"Ollama API Response: {result}")
+            
             return result.get("response", "")
 
         except requests.Timeout:
@@ -389,6 +392,109 @@ JSON:"""
                 error=str(e),
                 is_valid=True
             )
+
+    def analyze_sentiment_batch(self, texts: list) -> list:
+        """
+        Analyse le sentiment de plusieurs textes en une seule requête
+
+        Plus efficace que des appels individuels car:
+        - Une seule requête réseau
+        - Le modèle reste chargé en mémoire
+
+        Args:
+            texts: Liste de textes à analyser
+
+        Returns:
+            Liste de SentimentResult
+        """
+        if not texts:
+            return []
+
+        # Vérifier disponibilité Ollama
+        if not self.is_available():
+            logger.debug("Ollama not available, using fallback for batch")
+            return [
+                SentimentResult(
+                    sentiment=self._fallback_sentiment(t),
+                    confidence=0.3,
+                    reasoning="Fallback keyword detection",
+                    is_valid=True
+                )
+                for t in texts
+            ]
+
+        # Construire prompt batch
+        batch_prompt = """Analyze the sentiment of each news headline below.
+For EACH headline, output a JSON on a separate line:
+{"id": N, "sentiment": "POSITIF" or "NEGATIF" or "NEUTRE", "confidence": 0.0-1.0}
+
+Headlines:
+"""
+        for i, text in enumerate(texts):
+            truncated = text[:200] if text else ""
+            batch_prompt += f"{i+1}. {truncated}\n"
+
+        batch_prompt += "\nJSON outputs (one per line):"
+
+        try:
+            response = self._generate(batch_prompt)
+            results = self._parse_batch_response(response, texts)
+            return results
+
+        except Exception as e:
+            logger.error(f"Batch sentiment analysis failed: {e}")
+            # Fallback individuel
+            return [
+                SentimentResult(
+                    sentiment=self._fallback_sentiment(t),
+                    confidence=0.2,
+                    error=str(e),
+                    is_valid=True
+                )
+                for t in texts
+            ]
+
+    def _parse_batch_response(self, response: str, original_texts: list) -> list:
+        """Parse la réponse batch et retourne les résultats"""
+        results = []
+        lines = response.strip().split('\n')
+
+        sentiment_map = {
+            "POSITIF": Sentiment.POSITIVE,
+            "POSITIVE": Sentiment.POSITIVE,
+            "NEGATIF": Sentiment.NEGATIVE,
+            "NEGATIVE": Sentiment.NEGATIVE,
+            "NEUTRE": Sentiment.NEUTRAL,
+            "NEUTRAL": Sentiment.NEUTRAL
+        }
+
+        parsed_count = 0
+        for line in lines:
+            parsed = self._parse_json_response(line)
+            if parsed and parsed_count < len(original_texts):
+                sentiment_str = parsed.get("sentiment", "").upper()
+                sentiment = sentiment_map.get(sentiment_str, Sentiment.NEUTRAL)
+                confidence = float(parsed.get("confidence", 0.5))
+                confidence = max(0.0, min(1.0, confidence))
+
+                results.append(SentimentResult(
+                    sentiment=sentiment,
+                    confidence=confidence,
+                    is_valid=True
+                ))
+                parsed_count += 1
+
+        # Compléter avec fallback si parsing incomplet
+        while len(results) < len(original_texts):
+            idx = len(results)
+            results.append(SentimentResult(
+                sentiment=self._fallback_sentiment(original_texts[idx]),
+                confidence=0.3,
+                reasoning="Fallback - batch parsing incomplete",
+                is_valid=True
+            ))
+
+        return results
 
 
 # Instance singleton

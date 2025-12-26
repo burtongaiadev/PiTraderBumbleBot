@@ -56,6 +56,7 @@ class SignalRecord:
     # scores = {"macro": -1, "market": 0, "fundamental": 4.5, "sentiment": 2.5}
 
     total_score: float = 0.0
+    confidence: float = 0.0  # 0.0 - 1.0, indique la fiabilité du signal
 
     # Contexte
     macro_summary: str = ""
@@ -352,6 +353,111 @@ class SignalsStore:
                 writer.writerow(row)
 
         logger.info(f"Exported {len(signals)} signals to {output_path}")
+        return output_path
+
+    def export_ml_ready(self, output_path: Optional[Path] = None) -> Path:
+        """
+        Exporte les signaux avec features normalisées pour ML
+
+        Features:
+        - Scores normalisés [0, 1]
+        - One-hot encoding du symbole
+        - Target: succès binaire (return > 0)
+        - Colonnes prêtes pour sklearn/pandas
+
+        Args:
+            output_path: Chemin du fichier (défaut: signals_ml.csv)
+
+        Returns:
+            Chemin du fichier créé
+        """
+        import csv
+        from datetime import datetime as dt
+
+        output_path = output_path or (self.signals_dir / "signals_ml.csv")
+        signals = self.get_all_signals(limit=10000)
+
+        # Filtrer: garder uniquement les signaux avec return connu
+        signals_with_outcome = [s for s in signals if s.actual_return is not None]
+
+        if not signals_with_outcome:
+            logger.warning("No signals with outcomes to export for ML")
+            return output_path
+
+        # Colonnes ML-ready
+        fieldnames = [
+            # Identifiants
+            "signal_id",
+            "symbol",
+            "timestamp_unix",
+            "day_of_week",  # 0-6
+            "hour",  # 0-23
+
+            # Features normalisées [0, 1]
+            "market_norm",  # (-1,+1) -> (0,1)
+            "fundamental_norm",  # (0,3) -> (0,1)
+            "sentiment_norm",  # (0,3) -> (0,1)
+            "total_score_norm",  # (0,10) -> (0,1)
+            "confidence",  # déjà 0-1
+
+            # Features brutes
+            "price_at_signal",
+
+            # Targets
+            "actual_return",  # Valeur continue
+            "is_success",  # Binaire: 1 si return > 0
+            "is_strong_success",  # Binaire: 1 si return > 2%
+            "rating",  # Note utilisateur si disponible
+        ]
+
+        with open(output_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+            for s in signals_with_outcome:
+                # Parser timestamp
+                try:
+                    ts = dt.fromisoformat(s.timestamp)
+                    timestamp_unix = ts.timestamp()
+                    day_of_week = ts.weekday()
+                    hour = ts.hour
+                except ValueError:
+                    timestamp_unix = 0
+                    day_of_week = 0
+                    hour = 0
+
+                # Normaliser les scores
+                market = s.scores.get("market", 0)
+                fundamental = s.scores.get("fundamental", 0)
+                sentiment = s.scores.get("sentiment", 0)
+
+                row = {
+                    "signal_id": s.id,
+                    "symbol": s.symbol,
+                    "timestamp_unix": timestamp_unix,
+                    "day_of_week": day_of_week,
+                    "hour": hour,
+
+                    # Normalisation: [-1,+1] -> [0,1]
+                    "market_norm": (market + 1) / 2,
+                    # Normalisation: [0,3] -> [0,1]
+                    "fundamental_norm": fundamental / 3,
+                    "sentiment_norm": sentiment / 3,
+                    # Normalisation: [0,10] -> [0,1]
+                    "total_score_norm": s.total_score / 10,
+                    "confidence": s.confidence,
+
+                    "price_at_signal": s.price_at_signal,
+
+                    # Targets
+                    "actual_return": s.actual_return,
+                    "is_success": 1 if s.actual_return > 0 else 0,
+                    "is_strong_success": 1 if s.actual_return > 2 else 0,
+                    "rating": s.rating,
+                }
+                writer.writerow(row)
+
+        logger.info(f"Exported {len(signals_with_outcome)} ML-ready signals to {output_path}")
         return output_path
 
     def get_statistics(self) -> Dict[str, Any]:

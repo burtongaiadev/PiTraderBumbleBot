@@ -25,6 +25,7 @@ class MarketContext:
     avg_change: float = 0.0  # Variation moyenne watchlist
     positive_count: int = 0
     negative_count: int = 0
+    high_volume_count: int = 0  # Nombre d'actions avec volume anormal
     recommendation: str = ""
     is_valid: bool = True
 
@@ -33,21 +34,28 @@ class MarketContextAnalyzer:
     """Analyse le contexte via momentum de la watchlist"""
 
     def analyze(self) -> MarketContext:
-        """Calcule le momentum moyen de la watchlist"""
+        """Calcule le momentum moyen de la watchlist (batch request)"""
         try:
+            # Requête batch: 1 appel API pour tous les symboles
+            symbols = config.watchlist[:8]  # Limiter pour économiser
+            quotes = twelve_data_client.get_multiple_quotes(symbols)
+
             changes = []
             positive = 0
             negative = 0
+            high_volume = 0
 
-            # Récupérer les quotes de la watchlist
-            for symbol in config.watchlist[:5]:  # Top 5 pour économiser API calls
-                quote = twelve_data_client.get_quote(symbol)
+            for symbol, quote in quotes.items():
                 if quote.is_valid and quote.change_percent is not None:
                     changes.append(quote.change_percent)
                     if quote.change_percent > 0:
                         positive += 1
                     else:
                         negative += 1
+
+                    # Détecter volume anormal (>2x moyenne)
+                    if quote.volume_ratio and quote.volume_ratio >= 2.0:
+                        high_volume += 1
 
             if not changes:
                 logger.info("Market: Pas de données disponibles")
@@ -69,13 +77,18 @@ class MarketContextAnalyzer:
                 score = 0
                 reco = "Marché neutre"
 
-            logger.info(f"Market: {positive}↑ {negative}↓ (avg: {avg:+.1f}%)")
+            # Ajouter info volume si anormal
+            if high_volume > 0:
+                reco += f" ({high_volume} vol. anormal)"
+
+            logger.info(f"Market: {positive}↑ {negative}↓ (avg: {avg:+.1f}%) [vol: {high_volume}]")
 
             return MarketContext(
                 market_score=score,
                 avg_change=avg,
                 positive_count=positive,
                 negative_count=negative,
+                high_volume_count=high_volume,
                 recommendation=reco,
                 is_valid=True
             )

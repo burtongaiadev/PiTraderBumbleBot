@@ -19,10 +19,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import config
-from utils.decorators import retry_with_backoff
+from utils.decorators import retry_with_backoff, CircuitBreaker
 from utils.cache import ttl_lru_cache
 
 logger = logging.getLogger(__name__)
+
+# Circuit breaker pour Twelve Data API
+_twelve_data_cb = CircuitBreaker(
+    failure_threshold=5,
+    recovery_timeout=120,
+    exceptions=(requests.RequestException, ConnectionError, TimeoutError, ValueError)
+)
 
 
 @dataclass
@@ -33,6 +40,8 @@ class StockQuote:
     change: Optional[float] = None
     change_percent: Optional[float] = None
     volume: Optional[int] = None
+    avg_volume: Optional[int] = None  # Volume moyen 20 jours
+    volume_ratio: Optional[float] = None  # volume / avg_volume (>2 = anormal)
     timestamp: Optional[datetime] = None
     is_valid: bool = True
     error: Optional[str] = None
@@ -66,16 +75,42 @@ class TwelveDataClient:
         self.api_key = config.twelve_data.api_key
         self.base_url = config.twelve_data.base_url
         self.timeout = config.twelve_data.timeout
-        self._last_request_time = 0.0
-        self._request_delay = config.twelve_data.request_delay
+        self._request_times = []  # Fenêtre glissante des requêtes
+        self._max_requests_per_minute = config.twelve_data.requests_per_minute
+        self._min_delay = config.twelve_data.request_delay
 
     def _enforce_rate_limit(self):
-        """Respecte le délai entre requêtes"""
-        elapsed = time.time() - self._last_request_time
-        if elapsed < self._request_delay:
-            time.sleep(self._request_delay - elapsed)
-        self._last_request_time = time.time()
+        """
+        Rate limiting strict avec fenêtre glissante
 
+        Assure qu'on ne dépasse jamais 8 req/min en:
+        1. Attendant le délai minimum entre requêtes
+        2. Vérifiant qu'on n'a pas dépassé 8 req dans la dernière minute
+        """
+        now = time.time()
+
+        # 1. Nettoyer les requêtes de plus d'une minute
+        self._request_times = [t for t in self._request_times if now - t < 60]
+
+        # 2. Si on a atteint la limite, attendre
+        if len(self._request_times) >= self._max_requests_per_minute:
+            oldest = self._request_times[0]
+            wait_time = 60 - (now - oldest) + 1  # +1s de marge
+            if wait_time > 0:
+                logger.warning(f"Rate limit reached, waiting {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                now = time.time()
+                self._request_times = [t for t in self._request_times if now - t < 60]
+
+        # 3. Respecter le délai minimum entre requêtes
+        if self._request_times:
+            elapsed = now - self._request_times[-1]
+            if elapsed < self._min_delay:
+                time.sleep(self._min_delay - elapsed)
+
+        self._request_times.append(time.time())
+
+    @_twelve_data_cb
     @retry_with_backoff(
         exceptions=(requests.RequestException, ConnectionError, TimeoutError),
         max_retries=3,
@@ -92,6 +127,8 @@ class TwelveDataClient:
         response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         data = response.json()
+        
+        logger.debug(f"TwelveData {endpoint}: {params.get('symbol', 'unknown')}")
 
         if "code" in data and data.get("status") == "error":
             raise ValueError(f"API Error: {data.get('message', 'Unknown error')}")
@@ -189,11 +226,97 @@ class TwelveDataClient:
             return HistoricalData(symbol=symbol, is_valid=False, error=str(e))
 
     def get_multiple_quotes(self, symbols: List[str]) -> Dict[str, StockQuote]:
-        """Récupère plusieurs quotes"""
+        """
+        Récupère plusieurs quotes en une seule requête batch
+
+        Utilise l'endpoint /quote avec symboles séparés par virgules.
+        1 requête au lieu de N requêtes = économie majeure d'API calls.
+        """
+        if not symbols:
+            return {}
+
         results = {}
+
+        try:
+            # Requête batch: /quote?symbol=AAPL,MSFT,GOOGL
+            symbols_str = ",".join(symbols)
+            data = self._request("/quote", {"symbol": symbols_str})
+
+            # TwelveData batch response formats:
+            # 1. Single symbol: {"symbol": "AAPL", "close": "150.00", ...}
+            # 2. Multiple symbols: {"AAPL": {"symbol": "AAPL", ...}, "MSFT": {...}}
+            if isinstance(data, dict):
+                if "symbol" in data and len(symbols) == 1:
+                    # Réponse unique
+                    quote = self._parse_quote_data(data)
+                    results[quote.symbol] = quote
+                else:
+                    # Réponse batch: dict keyed by symbol
+                    for key, value in data.items():
+                        if isinstance(value, dict):
+                            # Vérifier si c'est une erreur pour ce symbole
+                            if value.get("status") == "error":
+                                error_msg = value.get("message", "Unknown error")
+                                results[key] = StockQuote(symbol=key, is_valid=False, error=error_msg)
+                            else:
+                                quote = self._parse_quote_data(value)
+                                results[quote.symbol] = quote
+            else:
+                # Format inattendu, fallback individuel
+                logger.warning("Unexpected batch response format, falling back to individual requests")
+                for symbol in symbols:
+                    results[symbol] = self.get_quote(symbol)
+
+        except Exception as e:
+            logger.error(f"Batch quote failed: {e}, falling back to individual requests")
+            for symbol in symbols:
+                results[symbol] = self.get_quote(symbol)
+
+        # S'assurer que tous les symboles ont un résultat
         for symbol in symbols:
-            results[symbol] = self.get_quote(symbol)
+            if symbol not in results:
+                results[symbol] = StockQuote(symbol=symbol, is_valid=False, error="Missing from batch response")
+
         return results
+
+    def _parse_quote_data(self, data: Dict[str, Any]) -> StockQuote:
+        """Parse les données d'une quote depuis la réponse API"""
+        symbol = data.get("symbol", "UNKNOWN")
+        volume = self._safe_int(data.get("volume"))
+        avg_volume = self._safe_int(data.get("average_volume"))
+
+        # Calculer le ratio volume/moyenne
+        volume_ratio = None
+        if volume and avg_volume and avg_volume > 0:
+            volume_ratio = volume / avg_volume
+
+        return StockQuote(
+            symbol=symbol,
+            price=self._safe_float(data.get("close")),
+            change=self._safe_float(data.get("change")),
+            change_percent=self._safe_float(data.get("percent_change")),
+            volume=volume,
+            avg_volume=avg_volume,
+            volume_ratio=volume_ratio,
+            timestamp=datetime.now(),
+            is_valid=True
+        )
+
+    def has_abnormal_volume(self, symbol: str, threshold: float = 2.0) -> bool:
+        """
+        Détecte si le volume est anormalement élevé
+
+        Args:
+            symbol: Ticker
+            threshold: Ratio minimum (défaut 2.0 = 2x la moyenne)
+
+        Returns:
+            True si volume > threshold * moyenne
+        """
+        quote = self.get_quote(symbol)
+        if quote.is_valid and quote.volume_ratio:
+            return quote.volume_ratio >= threshold
+        return False
 
     @staticmethod
     def _safe_float(value: Any) -> Optional[float]:

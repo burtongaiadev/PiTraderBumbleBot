@@ -48,9 +48,9 @@ class TwelveDataConfig:
     timeout: int = 30
     max_retries: int = 3
     retry_delay: float = 2.0
-    # Rate limiting
-    requests_per_minute: int = 8  # Plan gratuit: 800/jour ≈ 8/min pour être safe
-    request_delay: float = 1.5  # Délai entre requêtes
+    # Rate limiting - STRICT pour respecter 8 req/min
+    requests_per_minute: int = 8  # Plan gratuit: 800/jour, max 8/min
+    request_delay: float = 8.0  # 60s / 8 req = 7.5s minimum, on prend 8s pour marge
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,19 @@ class NewsAPIConfig:
     max_retries: int = 3
     # Plan gratuit: 100 req/jour
     requests_per_day: int = 100
+    # Sources financières fiables uniquement
+    domains: str = ",".join([
+        "reuters.com",
+        "bloomberg.com",
+        "cnbc.com",
+        "wsj.com",
+        "ft.com",
+        "marketwatch.com",
+        "finance.yahoo.com",
+        "barrons.com",
+        "seekingalpha.com",
+        "investors.com",
+    ])
 
 
 @dataclass(frozen=True)
@@ -89,22 +102,6 @@ class ThermalConfig:
 @dataclass(frozen=True)
 class ScoringConfig:
     """Seuils de scoring pour l'analyse"""
-
-    # === MACRO ECONOMY (score: -3 à +1) ===
-    # Taux 10 ans US
-    treasury_10y_high: float = 4.5   # Au-dessus = négatif (-2)
-    treasury_10y_low: float = 3.0    # En-dessous = positif (+1)
-    treasury_spike_threshold: float = 0.03  # +3% en 24h = DANGER
-
-    # Dollar Index
-    dxy_high: float = 105.0   # Dollar fort = négatif pour actions US (-1)
-    dxy_low: float = 100.0    # Dollar faible = positif (+1)
-
-    # === MARKET CONTEXT (score: -2 à +1) ===
-    sp500_bear_threshold: float = -20.0  # % depuis ATH = Bear Market
-    sp500_correction_threshold: float = -10.0  # Correction
-    vix_high: float = 25.0      # Volatilité élevée
-    vix_extreme: float = 35.0   # Volatilité extrême
 
     # === FUNDAMENTALS (score: 0 à 5) ===
     # Marge Nette (0-2 points)
@@ -134,24 +131,27 @@ class Config:
     watchlist: List[str] = field(default_factory=lambda: [
         "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
         "META", "TSLA", "JPM", "V", "JNJ",
-        "AVGO", "LLY", "JPM", "WMT", "ORCL", "MA"
+        "AVGO", "LLY", "WMT", "ORCL", "MA"
     ])
 
-    # === INDICES DE RÉFÉRENCE ===
-    # Symbols Twelve Data pour les indices
-    market_indices: Dict[str, str] = field(default_factory=lambda: {
-        "sp500": "SPX",        # S&P 500
-        "vix": "VIX",          # Volatility Index
-        "treasury_10y": "TNX", # 10-Year Treasury Yield (peut nécessiter ajustement)
-        "dollar_index": "DXY"  # Dollar Index
+    # === MAPPING TICKER → NOM (pour NewsAPI) ===
+    ticker_names: Dict[str, str] = field(default_factory=lambda: {
+        "AAPL": "Apple",
+        "MSFT": "Microsoft",
+        "GOOGL": "Google Alphabet",
+        "AMZN": "Amazon",
+        "NVDA": "Nvidia",
+        "META": "Meta Facebook",
+        "TSLA": "Tesla",
+        "JPM": "JPMorgan",
+        "V": "Visa",
+        "JNJ": "Johnson & Johnson",
+        "AVGO": "Broadcom",
+        "LLY": "Eli Lilly",
+        "WMT": "Walmart",
+        "ORCL": "Oracle",
+        "MA": "Mastercard",
     })
-
-    # === MOTS-CLÉS MACRO ===
-    macro_keywords: List[str] = field(default_factory=lambda: [
-        "Federal Reserve", "Fed", "Jerome Powell",
-        "interest rate", "inflation", "CPI",
-        "employment", "GDP", "recession"
-    ])
 
     # === SOUS-CONFIGURATIONS ===
     telegram: TelegramConfig = field(default_factory=TelegramConfig)

@@ -5,14 +5,17 @@ Patterns implémentés:
 - LRU avec expiration temporelle
 - Thread-safe avec locks
 - Décorateur de cache pour fonctions
+- Cache persistant cross-restart
 
 Optimisé pour Raspberry Pi 5 (4GB RAM)
 """
 import time
 import threading
+import json
 from functools import wraps
 from typing import Callable, Optional, Any, Dict
 from collections import OrderedDict
+from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
@@ -254,5 +257,145 @@ class CacheManager:
         }
 
 
+class PersistentCache(TTLCache):
+    """
+    Cache persistant qui survit aux redémarrages
+
+    Sauvegarde sur disque en JSON et recharge au démarrage.
+    Utile pour éviter de refaire des appels API après un reboot.
+    """
+
+    def __init__(self, filepath: Path, maxsize: int = 100, ttl: int = 300):
+        """
+        Args:
+            filepath: Chemin du fichier de persistance
+            maxsize: Nombre maximum d'entrées
+            ttl: Time-to-live en secondes
+        """
+        super().__init__(maxsize=maxsize, ttl=ttl)
+        self.filepath = Path(filepath)
+        self._load()
+
+    def _load(self):
+        """Charge le cache depuis le fichier"""
+        if not self.filepath.exists():
+            return
+
+        try:
+            with open(self.filepath, "r") as f:
+                data = json.load(f)
+
+            now = time.time()
+            loaded = 0
+
+            for key, entry in data.items():
+                timestamp = entry.get("ts", 0)
+                value = entry.get("val")
+
+                # Ne charger que les entrées non expirées
+                if now - timestamp < self.ttl:
+                    self._cache[key] = value
+                    self._timestamps[key] = timestamp
+                    loaded += 1
+
+            if loaded > 0:
+                logger.info(f"Loaded {loaded} entries from {self.filepath.name}")
+
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load cache from {self.filepath}: {e}")
+
+    def save(self):
+        """Sauvegarde le cache sur disque"""
+        try:
+            self.filepath.parent.mkdir(parents=True, exist_ok=True)
+
+            with self._lock:
+                data = {}
+                for key in self._cache:
+                    # Convertir la clé en string pour JSON
+                    str_key = str(key)
+                    data[str_key] = {
+                        "ts": self._timestamps[key],
+                        "val": self._cache[key]
+                    }
+
+            with open(self.filepath, "w") as f:
+                json.dump(data, f)
+
+            logger.debug(f"Saved {len(data)} entries to {self.filepath.name}")
+
+        except (IOError, TypeError) as e:
+            logger.warning(f"Failed to save cache to {self.filepath}: {e}")
+
+    def set(self, key: Any, value: Any):
+        """Stocke et sauvegarde"""
+        super().set(key, value)
+        # Sauvegarder périodiquement (pas à chaque set pour performance)
+        if len(self._cache) % 10 == 0:
+            self.save()
+
+    def clear(self):
+        """Vide le cache et le fichier"""
+        super().clear()
+        if self.filepath.exists():
+            self.filepath.unlink()
+
+
+class PersistentCacheManager:
+    """
+    Gestionnaire de caches persistants
+
+    Crée des caches qui survivent aux redémarrages.
+    """
+
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.caches: Dict[str, PersistentCache] = {}
+
+    def get_or_create(self, name: str, maxsize: int = 100, ttl: int = 300) -> PersistentCache:
+        """
+        Récupère ou crée un cache persistant
+
+        Args:
+            name: Nom du cache (sera utilisé comme nom de fichier)
+            maxsize: Taille maximum
+            ttl: Time-to-live en secondes
+
+        Returns:
+            PersistentCache instance
+        """
+        if name not in self.caches:
+            filepath = self.cache_dir / f"{name}.json"
+            self.caches[name] = PersistentCache(filepath, maxsize, ttl)
+            logger.debug(f"Created persistent cache '{name}'")
+
+        return self.caches[name]
+
+    def save_all(self):
+        """Sauvegarde tous les caches"""
+        for name, cache in self.caches.items():
+            cache.save()
+        logger.info(f"Saved {len(self.caches)} persistent caches")
+
+    def clear_all(self):
+        """Vide tous les caches persistants"""
+        for cache in self.caches.values():
+            cache.clear()
+
+
 # Instance globale du gestionnaire de cache
 cache_manager = CacheManager()
+
+# Gestionnaire de caches persistants (initialisé après import de config)
+_persistent_cache_manager: Optional[PersistentCacheManager] = None
+
+
+def get_persistent_cache_manager() -> PersistentCacheManager:
+    """Retourne le gestionnaire de caches persistants"""
+    global _persistent_cache_manager
+    if _persistent_cache_manager is None:
+        # Import tardif pour éviter import circulaire
+        from config import config
+        _persistent_cache_manager = PersistentCacheManager(config.cache_dir)
+    return _persistent_cache_manager
