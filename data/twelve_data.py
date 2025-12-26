@@ -1,15 +1,17 @@
 """
-data/twelve_data.py - Client Twelve Data API
+data/twelve_data.py - Client données marché
 
-API officielle et stable pour données financières.
-Remplace yfinance qui est instable (scraping).
+Utilise:
+- Twelve Data API pour actions (plan gratuit: 800 req/jour)
+- yfinance comme fallback pour indices et fondamentaux
 
-Endpoints utilisés:
+Endpoints Twelve Data:
 - /quote: Prix actuel
 - /time_series: Historique prix
-- /statistics: Données fondamentales
 
-Plan gratuit: 800 req/jour
+yfinance pour:
+- Indices (^GSPC, ^VIX, ^TNX, DX-Y.NYB)
+- Fondamentaux (info)
 """
 import requests
 import time
@@ -28,6 +30,14 @@ from utils.cache import ttl_lru_cache
 from utils.memory import memory_efficient
 
 logger = logging.getLogger(__name__)
+
+# Import yfinance avec gestion d'erreur
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+    logger.warning("yfinance not installed - some features disabled")
 
 
 @dataclass
@@ -70,29 +80,17 @@ class HistoricalData:
     """Données historiques"""
     symbol: str
     prices: List[Dict[str, Any]] = field(default_factory=list)
-    # Chaque prix: {datetime, open, high, low, close, volume}
     is_valid: bool = True
     error: Optional[str] = None
 
 
 class TwelveDataClient:
     """
-    Client Twelve Data API
+    Client données marché hybride
 
-    Caractéristiques:
-    - API officielle, stable
-    - Retry automatique avec backoff
-    - Circuit breaker
-    - Cache pour réduire requêtes
-    - Rate limiting intégré
+    - Twelve Data pour actions (quotes)
+    - yfinance pour indices et fondamentaux
     """
-
-    # Circuit breaker partagé
-    _circuit_breaker = CircuitBreaker(
-        failure_threshold=5,
-        recovery_timeout=120,
-        exceptions=(requests.RequestException, ConnectionError, TimeoutError)
-    )
 
     def __init__(self):
         self.api_key = config.twelve_data.api_key
@@ -115,16 +113,7 @@ class TwelveDataClient:
         backoff_factor=2.0
     )
     def _request(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Requête HTTP vers Twelve Data
-
-        Args:
-            endpoint: Endpoint API (ex: "/quote")
-            params: Paramètres de requête
-
-        Returns:
-            Réponse JSON
-        """
+        """Requête HTTP vers Twelve Data"""
         self._enforce_rate_limit()
 
         params["apikey"] = self.api_key
@@ -135,30 +124,43 @@ class TwelveDataClient:
             response.raise_for_status()
             data = response.json()
 
-            # Vérifier erreur API
             if "code" in data and data.get("status") == "error":
                 raise ValueError(f"API Error: {data.get('message', 'Unknown error')}")
 
             return data
 
         except requests.Timeout:
-            logger.error(f"Timeout on {endpoint}")
             raise TimeoutError(f"Timeout on {endpoint}")
         except requests.RequestException as e:
-            logger.error(f"Request failed: {e}")
             raise
+
+    def _is_index(self, symbol: str) -> bool:
+        """Vérifie si le symbol est un indice"""
+        index_symbols = ["SPX", "VIX", "TNX", "DXY", "^GSPC", "^VIX", "^TNX", "DX-Y.NYB"]
+        return symbol.upper() in [s.upper() for s in index_symbols]
+
+    def _get_yf_symbol(self, symbol: str) -> str:
+        """Convertit le symbol en format yfinance"""
+        mapping = {
+            "SPX": "^GSPC",
+            "VIX": "^VIX",
+            "TNX": "^TNX",
+            "DXY": "DX-Y.NYB"
+        }
+        return mapping.get(symbol.upper(), symbol)
 
     @ttl_lru_cache(maxsize=50, ttl=300)
     def get_quote(self, symbol: str) -> StockQuote:
         """
-        Récupère le prix actuel d'une action
+        Récupère le prix actuel
 
-        Args:
-            symbol: Ticker (ex: "AAPL")
-
-        Returns:
-            StockQuote avec prix et variation
+        Utilise yfinance pour les indices, Twelve Data pour les actions
         """
+        # Pour les indices, utiliser yfinance
+        if self._is_index(symbol):
+            return self._get_quote_yfinance(symbol)
+
+        # Pour les actions, essayer Twelve Data
         try:
             data = self._request("/quote", {"symbol": symbol})
 
@@ -173,55 +175,68 @@ class TwelveDataClient:
             )
 
         except Exception as e:
-            logger.error(f"Failed to get quote for {symbol}: {e}")
+            logger.warning(f"Twelve Data failed for {symbol}, trying yfinance: {e}")
+            return self._get_quote_yfinance(symbol)
+
+    def _get_quote_yfinance(self, symbol: str) -> StockQuote:
+        """Récupère quote via yfinance"""
+        if not YFINANCE_AVAILABLE:
+            return StockQuote(symbol=symbol, is_valid=False, error="yfinance not available")
+
+        try:
+            yf_symbol = self._get_yf_symbol(symbol)
+            ticker = yf.Ticker(yf_symbol)
+            info = ticker.info
+
+            price = info.get("regularMarketPrice") or info.get("previousClose")
+            change = info.get("regularMarketChange")
+            change_pct = info.get("regularMarketChangePercent")
+
             return StockQuote(
                 symbol=symbol,
-                is_valid=False,
-                error=str(e)
+                price=self._safe_float(price),
+                change=self._safe_float(change),
+                change_percent=self._safe_float(change_pct),
+                volume=self._safe_int(info.get("regularMarketVolume")),
+                timestamp=datetime.now(),
+                is_valid=price is not None
             )
+
+        except Exception as e:
+            logger.error(f"yfinance failed for {symbol}: {e}")
+            return StockQuote(symbol=symbol, is_valid=False, error=str(e))
 
     @ttl_lru_cache(maxsize=50, ttl=300)
     def get_fundamentals(self, symbol: str) -> StockFundamentals:
         """
-        Récupère les données fondamentales
+        Récupère les données fondamentales via yfinance
 
-        Args:
-            symbol: Ticker
-
-        Returns:
-            StockFundamentals avec marges, ratios, etc.
+        Twelve Data /statistics nécessite plan Pro
         """
-        try:
-            # Endpoint statistics pour fondamentaux
-            data = self._request("/statistics", {"symbol": symbol})
+        if not YFINANCE_AVAILABLE:
+            return StockFundamentals(symbol=symbol, is_valid=False, error="yfinance not available")
 
-            stats = data.get("statistics", {})
-            financials = stats.get("financials", {})
-            balance = financials.get("balance_sheet", {})
-            income = financials.get("income_statement", {})
-            valuation = stats.get("valuations_metrics", {})
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
 
             return StockFundamentals(
                 symbol=symbol,
-                net_margin=self._safe_float(income.get("net_profit_margin", {}).get("value")),
-                gross_margin=self._safe_float(income.get("gross_profit_margin", {}).get("value")),
-                operating_margin=self._safe_float(income.get("operating_margin", {}).get("value")),
-                debt_to_equity=self._safe_float(balance.get("debt_to_equity", {}).get("value")),
-                current_ratio=self._safe_float(balance.get("current_ratio", {}).get("value")),
-                roe=self._safe_float(financials.get("return_on_equity", {}).get("value")),
-                roa=self._safe_float(financials.get("return_on_assets", {}).get("value")),
-                pe_ratio=self._safe_float(valuation.get("trailing_pe", {}).get("value")),
-                market_cap=self._safe_float(valuation.get("market_capitalization", {}).get("value")),
+                net_margin=self._safe_float(info.get("profitMargins")),
+                gross_margin=self._safe_float(info.get("grossMargins")),
+                operating_margin=self._safe_float(info.get("operatingMargins")),
+                debt_to_equity=self._safe_float(info.get("debtToEquity")),
+                current_ratio=self._safe_float(info.get("currentRatio")),
+                roe=self._safe_float(info.get("returnOnEquity")),
+                roa=self._safe_float(info.get("returnOnAssets")),
+                pe_ratio=self._safe_float(info.get("trailingPE")),
+                market_cap=self._safe_float(info.get("marketCap")),
                 is_valid=True
             )
 
         except Exception as e:
             logger.error(f"Failed to get fundamentals for {symbol}: {e}")
-            return StockFundamentals(
-                symbol=symbol,
-                is_valid=False,
-                error=str(e)
-            )
+            return StockFundamentals(symbol=symbol, is_valid=False, error=str(e))
 
     @memory_efficient
     def get_time_series(
@@ -233,14 +248,11 @@ class TwelveDataClient:
         """
         Récupère l'historique des prix
 
-        Args:
-            symbol: Ticker
-            interval: Intervalle (1min, 5min, 15min, 30min, 45min, 1h, 2h, 4h, 1day, 1week, 1month)
-            outputsize: Nombre de points (max 5000)
-
-        Returns:
-            HistoricalData avec liste de prix
+        Utilise yfinance pour les indices, Twelve Data pour les actions
         """
+        if self._is_index(symbol):
+            return self._get_time_series_yfinance(symbol, outputsize)
+
         try:
             data = self._request("/time_series", {
                 "symbol": symbol,
@@ -261,47 +273,55 @@ class TwelveDataClient:
                     "volume": self._safe_int(v.get("volume"))
                 })
 
-            return HistoricalData(
-                symbol=symbol,
-                prices=prices,
-                is_valid=True
-            )
+            return HistoricalData(symbol=symbol, prices=prices, is_valid=True)
 
         except Exception as e:
-            logger.error(f"Failed to get time series for {symbol}: {e}")
-            return HistoricalData(
-                symbol=symbol,
-                is_valid=False,
-                error=str(e)
-            )
+            logger.warning(f"Twelve Data failed for {symbol} history, trying yfinance")
+            return self._get_time_series_yfinance(symbol, outputsize)
+
+    def _get_time_series_yfinance(self, symbol: str, days: int = 30) -> HistoricalData:
+        """Récupère historique via yfinance"""
+        if not YFINANCE_AVAILABLE:
+            return HistoricalData(symbol=symbol, is_valid=False, error="yfinance not available")
+
+        try:
+            yf_symbol = self._get_yf_symbol(symbol)
+            ticker = yf.Ticker(yf_symbol)
+
+            # Déterminer période
+            period = "1mo" if days <= 30 else "3mo" if days <= 90 else "1y"
+            df = ticker.history(period=period)
+
+            if df.empty:
+                return HistoricalData(symbol=symbol, is_valid=False, error="No data")
+
+            prices = []
+            for idx, row in df.iterrows():
+                prices.append({
+                    "datetime": idx.strftime("%Y-%m-%d"),
+                    "open": self._safe_float(row.get("Open")),
+                    "high": self._safe_float(row.get("High")),
+                    "low": self._safe_float(row.get("Low")),
+                    "close": self._safe_float(row.get("Close")),
+                    "volume": self._safe_int(row.get("Volume"))
+                })
+
+            return HistoricalData(symbol=symbol, prices=prices, is_valid=True)
+
+        except Exception as e:
+            logger.error(f"yfinance history failed for {symbol}: {e}")
+            return HistoricalData(symbol=symbol, is_valid=False, error=str(e))
 
     def get_index_quote(self, index_symbol: str) -> StockQuote:
-        """
-        Récupère le prix d'un indice
-
-        Args:
-            index_symbol: Symbol de l'indice (SPX, VIX, etc.)
-
-        Returns:
-            StockQuote
-        """
-        return self.get_quote(index_symbol)
+        """Récupère le prix d'un indice (via yfinance)"""
+        return self._get_quote_yfinance(index_symbol)
 
     def get_multiple_quotes(self, symbols: List[str]) -> Dict[str, StockQuote]:
-        """
-        Récupère plusieurs quotes avec délai
-
-        Args:
-            symbols: Liste de tickers
-
-        Returns:
-            Dict symbol -> StockQuote
-        """
+        """Récupère plusieurs quotes avec délai"""
         results = {}
         for i, symbol in enumerate(symbols):
             logger.info(f"Fetching quote {i+1}/{len(symbols)}: {symbol}")
             results[symbol] = self.get_quote(symbol)
-
         return results
 
     @staticmethod
@@ -310,7 +330,11 @@ class TwelveDataClient:
         if value is None:
             return None
         try:
-            return float(value)
+            f = float(value)
+            # Vérifier NaN
+            if f != f:  # NaN check
+                return None
+            return f
         except (ValueError, TypeError):
             return None
 

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class SentimentScore:
     """Score de sentiment pour une action"""
     symbol: str
-    total_score: float  # 0-3
+    total_score: float = 0.0  # 0-3
 
     # Détails
     articles_analyzed: int = 0
