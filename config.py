@@ -133,7 +133,8 @@ class Config:
     # === WATCHLIST ===
     watchlist: List[str] = field(default_factory=lambda: [
         "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
-        "META", "TSLA", "JPM", "V", "JNJ"
+        "META", "TSLA", "JPM", "V", "JNJ",
+        "AVGO", "LLY", "JPM", "WMT", "ORCL", "MA"
     ])
 
     # === INDICES DE RÉFÉRENCE ===
