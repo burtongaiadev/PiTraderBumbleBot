@@ -128,29 +128,60 @@ class Config:
     """Configuration principale PiTrader"""
 
     # === WATCHLIST ===
+    # Top 50 S&P 500 + Top 30 CAC 40 + Top 30 DAX
     watchlist: List[str] = field(default_factory=lambda: [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
-        "META", "TSLA", "JPM", "V", "JNJ",
-        "AVGO", "LLY", "WMT", "ORCL", "MA"
+        # === S&P 500 - Top 50 ===
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK.B", "UNH", "JNJ",
+        "JPM", "V", "XOM", "PG", "MA", "HD", "CVX", "MRK", "ABBV", "LLY",
+        "PEP", "KO", "COST", "AVGO", "WMT", "MCD", "CSCO", "TMO", "ACN", "ABT",
+        "DHR", "VZ", "ADBE", "CRM", "NKE", "CMCSA", "NEE", "TXN", "PM", "RTX",
+        "ORCL", "HON", "UNP", "LOW", "INTC", "QCOM", "IBM", "AMGN", "CAT", "BA",
+        # === CAC 40 - Top 30 ===
+        "MC.PA", "OR.PA", "RMS.PA", "TTE.PA", "SAN.PA", "AIR.PA", "SU.PA", "AI.PA",
+        "BNP.PA", "CS.PA", "SAF.PA", "EL.PA", "KER.PA", "DG.PA", "RI.PA", "CAP.PA",
+        "SGO.PA", "BN.PA", "ENGI.PA", "ACA.PA", "VIV.PA", "DSY.PA", "PUB.PA", "STM.PA",
+        "LR.PA", "ML.PA", "GLE.PA", "ORA.PA", "HO.PA", "WLN.PA",
+        # === DAX 40 - Top 30 ===
+        "SAP.DE", "SIE.DE", "ALV.DE", "DTE.DE", "AIR.DE", "MBG.DE", "BMW.DE", "MUV2.DE",
+        "BAS.DE", "BAYN.DE", "IFX.DE", "ADS.DE", "DB1.DE", "DPW.DE", "HEN3.DE", "SHL.DE",
+        "VOW3.DE", "RWE.DE", "DBK.DE", "EOAN.DE", "FRE.DE", "MTX.DE", "BEI.DE", "HEI.DE",
+        "CON.DE", "MRK.DE", "VNA.DE", "FME.DE", "SY1.DE", "PAH3.DE",
     ])
 
     # === MAPPING TICKER → NOM (pour NewsAPI) ===
     ticker_names: Dict[str, str] = field(default_factory=lambda: {
-        "AAPL": "Apple",
-        "MSFT": "Microsoft",
-        "GOOGL": "Google Alphabet",
-        "AMZN": "Amazon",
-        "NVDA": "Nvidia",
-        "META": "Meta Facebook",
-        "TSLA": "Tesla",
-        "JPM": "JPMorgan",
-        "V": "Visa",
-        "JNJ": "Johnson & Johnson",
-        "AVGO": "Broadcom",
-        "LLY": "Eli Lilly",
-        "WMT": "Walmart",
-        "ORCL": "Oracle",
-        "MA": "Mastercard",
+        # S&P 500
+        "AAPL": "Apple", "MSFT": "Microsoft", "GOOGL": "Google Alphabet", "AMZN": "Amazon",
+        "NVDA": "Nvidia", "META": "Meta Facebook", "TSLA": "Tesla", "BRK.B": "Berkshire Hathaway",
+        "UNH": "UnitedHealth", "JNJ": "Johnson & Johnson", "JPM": "JPMorgan", "V": "Visa",
+        "XOM": "ExxonMobil", "PG": "Procter & Gamble", "MA": "Mastercard", "HD": "Home Depot",
+        "CVX": "Chevron", "MRK": "Merck", "ABBV": "AbbVie", "LLY": "Eli Lilly",
+        "PEP": "PepsiCo", "KO": "Coca-Cola", "COST": "Costco", "AVGO": "Broadcom",
+        "WMT": "Walmart", "MCD": "McDonald's", "CSCO": "Cisco", "TMO": "Thermo Fisher",
+        "ACN": "Accenture", "ABT": "Abbott", "DHR": "Danaher", "VZ": "Verizon",
+        "ADBE": "Adobe", "CRM": "Salesforce", "NKE": "Nike", "CMCSA": "Comcast",
+        "NEE": "NextEra Energy", "TXN": "Texas Instruments", "PM": "Philip Morris", "RTX": "Raytheon",
+        "ORCL": "Oracle", "HON": "Honeywell", "UNP": "Union Pacific", "LOW": "Lowe's",
+        "INTC": "Intel", "QCOM": "Qualcomm", "IBM": "IBM", "AMGN": "Amgen",
+        "CAT": "Caterpillar", "BA": "Boeing",
+        # CAC 40
+        "MC.PA": "LVMH", "OR.PA": "L'Oréal", "RMS.PA": "Hermès", "TTE.PA": "TotalEnergies",
+        "SAN.PA": "Sanofi", "AIR.PA": "Airbus", "SU.PA": "Schneider Electric", "AI.PA": "Air Liquide",
+        "BNP.PA": "BNP Paribas", "CS.PA": "AXA", "SAF.PA": "Safran", "EL.PA": "EssilorLuxottica",
+        "KER.PA": "Kering", "DG.PA": "Vinci", "RI.PA": "Pernod Ricard", "CAP.PA": "Capgemini",
+        "SGO.PA": "Saint-Gobain", "BN.PA": "Danone", "ENGI.PA": "Engie", "ACA.PA": "Crédit Agricole",
+        "VIV.PA": "Vivendi", "DSY.PA": "Dassault Systèmes", "PUB.PA": "Publicis", "STM.PA": "STMicroelectronics",
+        "LR.PA": "Legrand", "ML.PA": "Michelin", "GLE.PA": "Société Générale", "ORA.PA": "Orange",
+        "HO.PA": "Thales", "WLN.PA": "Worldline",
+        # DAX 40
+        "SAP.DE": "SAP", "SIE.DE": "Siemens", "ALV.DE": "Allianz", "DTE.DE": "Deutsche Telekom",
+        "AIR.DE": "Airbus", "MBG.DE": "Mercedes-Benz", "BMW.DE": "BMW", "MUV2.DE": "Munich Re",
+        "BAS.DE": "BASF", "BAYN.DE": "Bayer", "IFX.DE": "Infineon", "ADS.DE": "Adidas",
+        "DB1.DE": "Deutsche Börse", "DPW.DE": "Deutsche Post", "HEN3.DE": "Henkel", "SHL.DE": "Siemens Healthineers",
+        "VOW3.DE": "Volkswagen", "RWE.DE": "RWE", "DBK.DE": "Deutsche Bank", "EOAN.DE": "E.ON",
+        "FRE.DE": "Fresenius", "MTX.DE": "MTU Aero", "BEI.DE": "Beiersdorf", "HEI.DE": "HeidelbergCement",
+        "CON.DE": "Continental", "MRK.DE": "Merck KGaA", "VNA.DE": "Vonovia", "FME.DE": "Fresenius Medical",
+        "SY1.DE": "Symrise", "PAH3.DE": "Porsche Holding",
     })
 
     # === SOUS-CONFIGURATIONS ===

@@ -81,9 +81,17 @@ All configuration in [config.py](config.py) using frozen dataclasses. Environmen
 - `OLLAMA_URL` - Local LLM endpoint (default: http://localhost:11434)
 
 Key config sections:
-- `config.watchlist` - List of tickers to monitor
+- `config.watchlist` - 110 stocks: Top 50 S&P 500 + Top 30 CAC 40 + Top 30 DAX
 - `config.ticker_names` - Mapping ticker → company name for better NewsAPI search
 - `config.news_api.domains` - Whitelisted financial news sources
+
+## Startup Notification
+
+On first run after a system reboot, PiTrader sends a Telegram notification with:
+- System info (hostname, uptime, CPU temperature)
+- Configuration (watchlist count, Ollama status)
+
+Detection uses Linux `/proc/sys/kernel/random/boot_id` to identify new boots.
 
 ## Code Conventions
 

@@ -326,6 +326,49 @@ class PiTrader:
         telegram_bot.send_message(message)
 
 
+def is_first_run_after_boot() -> bool:
+    """
+    Vérifie si c'est le premier lancement après un reboot
+
+    Utilise un fichier marqueur avec le boot_id du système.
+    """
+    marker_file = config.runtime_dir / ".last_boot_id"
+
+    # Récupérer le boot_id actuel (Linux)
+    try:
+        with open('/proc/sys/kernel/random/boot_id', 'r') as f:
+            current_boot_id = f.read().strip()
+    except (FileNotFoundError, IOError):
+        # Pas sur Linux, utiliser l'uptime comme fallback
+        try:
+            with open('/proc/uptime', 'r') as f:
+                uptime = float(f.readline().split()[0])
+                # Si uptime < 10 min, considérer comme premier run
+                return uptime < 600
+        except (FileNotFoundError, IOError):
+            return False
+
+    # Vérifier si le boot_id a changé
+    try:
+        if marker_file.exists():
+            with open(marker_file, 'r') as f:
+                last_boot_id = f.read().strip()
+            if last_boot_id == current_boot_id:
+                return False
+    except IOError:
+        pass
+
+    # Sauvegarder le nouveau boot_id
+    try:
+        marker_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(marker_file, 'w') as f:
+            f.write(current_boot_id)
+    except IOError:
+        pass
+
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="PiTrader - Bot de signaux")
     parser.add_argument("--test", action="store_true", help="Mode test (pas d'envoi Telegram)")
@@ -347,6 +390,14 @@ def main():
 
     # Warmup Ollama au démarrage
     trader.warmup()
+
+    # Notification Telegram au premier lancement après reboot
+    if not args.test and is_first_run_after_boot():
+        logger.info("📱 Premier lancement après reboot - Envoi notification...")
+        telegram_bot.send_startup_notification(
+            watchlist_count=len(config.watchlist),
+            ollama_available=ollama_client.is_available()
+        )
 
     if args.loop:
         logger.info(f"Mode boucle - intervalle: {args.interval}s")

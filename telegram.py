@@ -277,6 +277,57 @@ Choisissez une note:"""
         text = f"⚠️ <b>PiTrader Error</b>\n\n<code>{error[:500]}</code>"
         return self.send_message(text)
 
+    def send_startup_notification(self, watchlist_count: int, ollama_available: bool) -> bool:
+        """
+        Envoie une notification de démarrage après reboot
+
+        Args:
+            watchlist_count: Nombre d'actions surveillées
+            ollama_available: Si Ollama est disponible
+
+        Returns:
+            True si succès
+        """
+        from datetime import datetime
+        import platform
+        import os
+
+        # Récupérer uptime système
+        try:
+            with open('/proc/uptime', 'r') as f:
+                uptime_seconds = float(f.readline().split()[0])
+                uptime_min = int(uptime_seconds // 60)
+                uptime_str = f"{uptime_min} min" if uptime_min < 60 else f"{uptime_min // 60}h {uptime_min % 60}min"
+        except (FileNotFoundError, IOError):
+            uptime_str = "N/A"
+
+        # Récupérer température CPU (Raspberry Pi)
+        try:
+            with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+                cpu_temp = int(f.read()) / 1000
+                temp_str = f"{cpu_temp:.1f}°C"
+        except (FileNotFoundError, IOError):
+            temp_str = "N/A"
+
+        ollama_emoji = "✅" if ollama_available else "⚠️"
+        ollama_status = "Actif" if ollama_available else "Fallback"
+
+        text = f"""🚀 <b>PiTrader Démarré</b>
+{datetime.now().strftime('%d/%m/%Y %H:%M')}
+
+<b>Système</b>
+├─ Host: {platform.node()}
+├─ Uptime: {uptime_str}
+└─ CPU Temp: {temp_str}
+
+<b>Configuration</b>
+├─ Actions: {watchlist_count}
+└─ {ollama_emoji} Ollama: {ollama_status}
+
+<i>Première analyse en cours...</i>"""
+
+        return self.send_message(text)
+
     def send_daily_summary(
         self,
         macro_score: int,
