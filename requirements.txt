@@ -1,0 +1,11 @@
+# PiTrader - Requirements
+# Optimisé pour Raspberry Pi 5 (4GB RAM)
+
+# HTTP Client (pour Twelve Data, NewsAPI, Telegram, Ollama)
+requests>=2.31.0
+
+# Variables d'environnement
+python-dotenv>=1.0.0
+
+# Monitoring système (optionnel mais recommandé)
+psutil>=5.9.0

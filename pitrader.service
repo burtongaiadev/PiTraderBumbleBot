@@ -1,0 +1,24 @@
+[Unit]
+Description=PiTrader Trading Bot
+After=network.target ollama.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/PiTrader
+ExecStart=/usr/bin/python3 main.py --loop --interval 3600
+Restart=always
+RestartSec=60
+Environment=PYTHONUNBUFFERED=1
+
+# Limites ressources pour Pi
+MemoryMax=1G
+CPUQuota=80%
+
+# Logs
+StandardOutput=append:/home/pi/PiTrader/pitrader.log
+StandardError=append:/home/pi/PiTrader/pitrader.log
+
+[Install]
+WantedBy=multi-user.target
