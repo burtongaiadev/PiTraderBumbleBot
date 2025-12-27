@@ -63,6 +63,37 @@ class FedToneResult:
     error: Optional[str] = None
 
 
+@dataclass
+class LLMDiagnostics:
+    """Statistiques de validation du LLM"""
+    total_requests: int = 0
+    json_parse_success: int = 0
+    json_parse_failures: int = 0
+    fallback_used: int = 0
+    ollama_unavailable: int = 0
+    avg_confidence: float = 0.0
+    sentiment_distribution: dict = None
+
+    def __post_init__(self):
+        if self.sentiment_distribution is None:
+            self.sentiment_distribution = {"POSITIVE": 0, "NEGATIVE": 0, "NEUTRAL": 0}
+
+    def success_rate(self) -> float:
+        """Taux de parsing JSON réussi"""
+        if self.total_requests == 0:
+            return 0.0
+        return self.json_parse_success / self.total_requests
+
+    def summary(self) -> str:
+        """Résumé des stats"""
+        return (
+            f"LLM Stats: {self.total_requests} requêtes, "
+            f"{self.success_rate()*100:.0f}% JSON OK, "
+            f"{self.fallback_used} fallbacks, "
+            f"conf. moy: {self.avg_confidence:.2f}"
+        )
+
+
 class OllamaClient:
     """
     Client Ollama pour analyse IA
@@ -72,6 +103,7 @@ class OllamaClient:
     - Contexte réduit (2048 tokens)
     - Parsing robuste avec fallback
     - Cache 1h sur analyses
+    - Diagnostics pour valider qualité LLM
     """
 
     # Prompts
@@ -102,6 +134,9 @@ JSON:"""
         self.timeout = config.ollama.timeout
         self.num_ctx = config.ollama.num_ctx
         self.num_thread = config.ollama.num_thread
+        # Diagnostics
+        self.diagnostics = LLMDiagnostics()
+        self.debug_mode = False  # Activer pour logs détaillés
 
     def is_available(self) -> bool:
         """Vérifie si le serveur Ollama est disponible"""
@@ -185,6 +220,91 @@ JSON:"""
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON: {e}")
             return None
+
+    def _update_diagnostics(self, result: SentimentResult, used_fallback: bool, json_ok: bool):
+        """Met à jour les statistiques de diagnostic"""
+        self.diagnostics.total_requests += 1
+
+        if json_ok:
+            self.diagnostics.json_parse_success += 1
+        else:
+            self.diagnostics.json_parse_failures += 1
+
+        if used_fallback:
+            self.diagnostics.fallback_used += 1
+
+        # Mise à jour moyenne mobile de la confiance
+        n = self.diagnostics.total_requests
+        old_avg = self.diagnostics.avg_confidence
+        self.diagnostics.avg_confidence = old_avg + (result.confidence - old_avg) / n
+
+        # Distribution des sentiments
+        if result.sentiment == Sentiment.POSITIVE:
+            self.diagnostics.sentiment_distribution["POSITIVE"] += 1
+        elif result.sentiment == Sentiment.NEGATIVE:
+            self.diagnostics.sentiment_distribution["NEGATIVE"] += 1
+        else:
+            self.diagnostics.sentiment_distribution["NEUTRAL"] += 1
+
+    def _log_llm_response(self, text: str, raw_response: str, result: SentimentResult):
+        """Log détaillé pour debug/audit"""
+        if self.debug_mode:
+            logger.info(
+                f"[LLM DEBUG]\n"
+                f"  Input: {text[:100]}...\n"
+                f"  Raw: {raw_response[:200]}\n"
+                f"  Result: {result.sentiment.value}, conf={result.confidence:.2f}\n"
+                f"  Reason: {result.reasoning}"
+            )
+
+    def get_diagnostics(self) -> LLMDiagnostics:
+        """Retourne les diagnostics actuels"""
+        return self.diagnostics
+
+    def reset_diagnostics(self):
+        """Reset les statistiques"""
+        self.diagnostics = LLMDiagnostics()
+
+    def validate_llm_quality(self) -> dict:
+        """
+        Valide la qualité du LLM avec des cas de test connus
+
+        Returns:
+            dict avec score de validation et détails
+        """
+        test_cases = [
+            ("Apple stock soars 15% on record iPhone sales", Sentiment.POSITIVE),
+            ("Company announces massive layoffs, stock crashes", Sentiment.NEGATIVE),
+            ("Quarterly results meet analyst expectations", Sentiment.NEUTRAL),
+            ("Revenue beats expectations, profit margins expand", Sentiment.POSITIVE),
+            ("CEO resigns amid accounting scandal investigation", Sentiment.NEGATIVE),
+        ]
+
+        correct = 0
+        results = []
+
+        for text, expected in test_cases:
+            result = self.analyze_sentiment(text)
+            is_correct = result.sentiment == expected
+            if is_correct:
+                correct += 1
+
+            results.append({
+                "text": text[:50] + "...",
+                "expected": expected.value,
+                "got": result.sentiment.value,
+                "confidence": result.confidence,
+                "correct": is_correct
+            })
+
+        accuracy = correct / len(test_cases)
+
+        return {
+            "accuracy": accuracy,
+            "score": f"{correct}/{len(test_cases)}",
+            "status": "OK" if accuracy >= 0.8 else "WARNING" if accuracy >= 0.6 else "FAIL",
+            "details": results
+        }
 
     def _fallback_sentiment(self, text: str) -> Sentiment:
         """
@@ -273,12 +393,15 @@ JSON:"""
         # Vérifier disponibilité Ollama
         if not self.is_available():
             logger.debug("Ollama not available, using fallback")
-            return SentimentResult(
+            self.diagnostics.ollama_unavailable += 1
+            result = SentimentResult(
                 sentiment=self._fallback_sentiment(text),
                 confidence=0.3,
                 reasoning="Fallback keyword detection",
                 is_valid=True
             )
+            self._update_diagnostics(result, used_fallback=True, json_ok=False)
+            return result
 
         try:
             prompt = self.SENTIMENT_PROMPT.format(text=text)
@@ -300,29 +423,37 @@ JSON:"""
                 confidence = float(parsed.get("confidence", 0.5))
                 confidence = max(0.0, min(1.0, confidence))
 
-                return SentimentResult(
+                result = SentimentResult(
                     sentiment=sentiment,
                     confidence=confidence,
                     reasoning=parsed.get("reason"),
                     is_valid=True
                 )
+                self._update_diagnostics(result, used_fallback=False, json_ok=True)
+                self._log_llm_response(text, response, result)
+                return result
             else:
                 # Fallback si parsing échoue
-                return SentimentResult(
+                result = SentimentResult(
                     sentiment=self._fallback_sentiment(text),
                     confidence=0.3,
                     reasoning="Fallback - JSON parsing failed",
                     is_valid=True
                 )
+                self._update_diagnostics(result, used_fallback=True, json_ok=False)
+                self._log_llm_response(text, response, result)
+                return result
 
         except Exception as e:
             logger.error(f"Sentiment analysis failed: {e}")
-            return SentimentResult(
+            result = SentimentResult(
                 sentiment=self._fallback_sentiment(text),
                 confidence=0.2,
                 error=str(e),
                 is_valid=True
             )
+            self._update_diagnostics(result, used_fallback=True, json_ok=False)
+            return result
 
     @ttl_lru_cache(maxsize=100, ttl=3600)
     def analyze_fed_tone(self, text: str) -> FedToneResult:

@@ -15,6 +15,7 @@ from config import config
 from analysis.market_context import market_analyzer, MarketContext
 from analysis.fundamentals import fundamentals_analyzer, FundamentalScore
 from analysis.sentiment import sentiment_analyzer, SentimentScore
+from analysis.technical import technical_analyzer, TechnicalScore
 from storage.signals_store import signals_store, SignalRecord
 from telegram import telegram_bot
 from data.ollama_client import ollama_client
@@ -168,14 +169,20 @@ class PiTrader:
             valid = [f for f in fundamentals if f.is_valid]
             logger.info(f"   → {len(valid)} actions analysées")
 
-            # Phase 3: Sentiment (top 3)
-            logger.info("💬 Phase 3: Analyse Sentiment...")
-            top_symbols = [f.symbol for f in fundamentals[:3]]
-            sentiments = sentiment_analyzer.analyze_multiple(top_symbols)
+            # Phase 3: Technique (top 10 momentum)
+            logger.info("📉 Phase 3: Analyse Technique...")
+            top_momentum = [f.symbol for f in fundamentals[:10] if f.is_valid]
+            technicals = technical_analyzer.analyze_batch(top_momentum)
 
-            # Phase 4: Signaux
-            logger.info("🎯 Phase 4: Génération Signaux...")
-            signals = self._generate_signals(market, fundamentals, sentiments)
+            # Phase 4: Sentiment (top 5 après filtre technique)
+            logger.info("💬 Phase 4: Analyse Sentiment...")
+            # Filtrer: garder seulement ceux au-dessus de MM50
+            bullish_symbols = [t.symbol for t in technicals if t.is_valid and t.above_ma50][:5]
+            sentiments = sentiment_analyzer.analyze_multiple(bullish_symbols) if bullish_symbols else []
+
+            # Phase 5: Signaux
+            logger.info("🎯 Phase 5: Génération Signaux...")
+            signals = self._generate_signals(market, fundamentals, technicals, sentiments)
 
             # Résumé
             duration = (datetime.now() - start).seconds
@@ -184,7 +191,7 @@ class PiTrader:
             logger.info("═" * 50)
 
             # Envoi Telegram
-            self._send_summary(market, fundamentals, sentiments, signals)
+            self._send_summary(market, fundamentals, technicals, sentiments, signals)
 
         except Exception as e:
             logger.error(f"❌ Erreur: {e}")
@@ -198,11 +205,13 @@ class PiTrader:
         self,
         market: MarketContext,
         fundamentals: List[FundamentalScore],
+        technicals: List[TechnicalScore],
         sentiments: List[SentimentScore]
     ) -> List[SignalRecord]:
         """Génère les signaux d'achat"""
         signals = []
         sentiment_map = {s.symbol: s for s in sentiments}
+        technical_map = {t.symbol: t for t in technicals}
 
         # Condition bloquante: si market négatif, pas de signal
         if market.market_score < 0:
@@ -213,25 +222,42 @@ class PiTrader:
             if not fund.is_valid:
                 continue
 
+            tech = technical_map.get(fund.symbol)
             sent = sentiment_map.get(fund.symbol)
+
+            # Filtre technique: doit être au-dessus de MM50
+            if tech and tech.is_valid and not tech.above_ma50:
+                continue  # Skip si sous MM50
+
+            # Filtre RSI: éviter les surachats
+            if tech and tech.is_valid and tech.rsi_signal == "OVERBOUGHT":
+                continue  # Skip si RSI > 70
+
+            tech_score = tech.total_score if (tech and tech.is_valid) else 1.5
             sent_score = sent.total_score if sent else 1.5
 
             # Score total (0-10)
-            # Market: -1 à +1 → normalisé 0-4 (poids: 40%)
-            # Fundamental: 0-3 (poids: 30%)
-            # Sentiment: 0-3 (poids: 30%)
-            market_norm = (market.market_score + 1) * 2  # -1→0, 0→2, +1→4
+            # Market: -1 à +1 → normalisé 0-2.5 (poids: 25%)
+            # Technical: 0-3 → normalisé 0-2.5 (poids: 25%)
+            # Momentum: 0-3 → normalisé 0-2.5 (poids: 25%)
+            # Sentiment: 0-3 → normalisé 0-2.5 (poids: 25%)
+            market_norm = (market.market_score + 1) * 1.25  # -1→0, 0→1.25, +1→2.5
+            tech_norm = (tech_score / 3) * 2.5  # 0→0, 3→2.5
+            fund_norm = (fund.total_score / 3) * 2.5  # 0→0, 3→2.5
+            sent_norm = (sent_score / 3) * 2.5  # 0→0, 3→2.5
 
             # Score brut: 0 à 10
-            score = market_norm + fund.total_score + sent_score
+            score = market_norm + tech_norm + fund_norm + sent_norm
 
             if score >= config.scoring.alert_threshold:
-                # Récupérer prix actuel
-                quote = twelve_data_client.get_quote(fund.symbol)
-                price = quote.price if quote.is_valid else None
+                # Récupérer prix actuel (déjà dans tech si disponible)
+                price = tech.price if (tech and tech.is_valid) else None
+                if not price:
+                    quote = twelve_data_client.get_quote(fund.symbol)
+                    price = quote.price if quote.is_valid else None
 
                 # Calculer confiance globale
-                confidence = self._calculate_confidence(market, fund, sent)
+                confidence = self._calculate_confidence(market, fund, tech, sent)
 
                 signal = SignalRecord(
                     symbol=fund.symbol,
@@ -239,7 +265,8 @@ class PiTrader:
                     confidence=confidence,
                     scores={
                         "market": market.market_score,
-                        "fundamental": fund.total_score,
+                        "technical": tech_score,
+                        "momentum": fund.total_score,
                         "sentiment": sent_score
                     },
                     price_at_signal=price
@@ -247,7 +274,10 @@ class PiTrader:
                 signals.append(signal)
                 signals_store.save_signal(signal)
 
-                logger.info(f"   🚨 SIGNAL: {fund.symbol} ({score:.1f}/10, conf: {confidence:.0%})")
+                # Log avec détails techniques
+                ma_info = f"MA50:{tech.ma50_distance:+.0f}%" if (tech and tech.is_valid) else ""
+                rsi_info = f"RSI:{tech.rsi:.0f}" if (tech and tech.is_valid and tech.rsi) else ""
+                logger.info(f"   🚨 SIGNAL: {fund.symbol} ({score:.1f}/10, {ma_info} {rsi_info})")
 
         return signals
 
@@ -255,34 +285,47 @@ class PiTrader:
         self,
         market: MarketContext,
         fund: FundamentalScore,
+        tech: Optional[TechnicalScore],
         sent: Optional[SentimentScore]
     ) -> float:
         """
         Calcule un score de confiance global (0-1)
 
         Facteurs:
-        - Validité des données (market, fundamentals, sentiment)
+        - Validité des données (market, technical, fundamentals, sentiment)
+        - Force des indicateurs techniques
         - Confiance Ollama sur le sentiment
-        - Nombre d'articles analysés
         """
         factors = []
 
-        # 1. Validité des sources (0.33 chacune)
+        # 1. Validité des sources (0.25 chacune)
         if market.is_valid:
-            factors.append(0.33)
+            factors.append(0.25)
         if fund.is_valid:
-            factors.append(0.33)
+            factors.append(0.25)
+        if tech and tech.is_valid:
+            factors.append(0.25)
+        else:
+            factors.append(0.10)
         if sent and sent.is_valid:
             # Pondérer par la confiance Ollama
-            factors.append(0.33 * sent.avg_confidence if sent.avg_confidence > 0 else 0.20)
+            factors.append(0.25 * sent.avg_confidence if sent.avg_confidence > 0 else 0.15)
         else:
-            factors.append(0.15)
+            factors.append(0.10)
 
-        # 2. Bonus: nombre d'articles analysés (plus = plus confiant)
+        # 2. Bonus technique: forte position au-dessus de MM50
+        if tech and tech.is_valid and tech.ma50_distance > 5:
+            factors.append(0.05)
+
+        # 3. Bonus technique: RSI en zone idéale (40-60)
+        if tech and tech.is_valid and tech.rsi and 40 <= tech.rsi <= 60:
+            factors.append(0.05)
+
+        # 4. Bonus: nombre d'articles analysés (plus = plus confiant)
         if sent and sent.articles_analyzed >= 3:
-            factors.append(0.1)
+            factors.append(0.05)
 
-        # 3. Bonus: volume anormal détecté (signal plus fort)
+        # 5. Bonus: volume anormal détecté (signal plus fort)
         if market.high_volume_count > 0:
             factors.append(0.05)
 
@@ -292,6 +335,7 @@ class PiTrader:
         self,
         market: MarketContext,
         fundamentals: List[FundamentalScore],
+        technicals: List[TechnicalScore],
         _sentiments: List[SentimentScore],
         signals: List[SignalRecord]
     ):
@@ -300,6 +344,8 @@ class PiTrader:
             logger.info("[TEST] Message Telegram non envoyé")
             return
 
+        technical_map = {t.symbol: t for t in technicals}
+
         # Construire message
         lines = ["📊 <b>PiTrader - Résumé</b>\n"]
 
@@ -307,18 +353,25 @@ class PiTrader:
         market_emoji = "🟢" if market.market_score > 0 else "🔴" if market.market_score < 0 else "⚪"
         lines.append(f"{market_emoji} Marché: {market.market_score:+d} ({market.recommendation})\n")
 
-        # Top 3 momentum
-        lines.append("<b>Top Momentum:</b>")
+        # Top 3 momentum + technique
+        lines.append("<b>Top Actions:</b>")
         for f in fundamentals[:3]:
             if f.is_valid:
+                tech = technical_map.get(f.symbol)
                 emoji = "🟢" if f.momentum > 0.1 else "🔴" if f.momentum < -0.1 else "⚪"
-                lines.append(f"  {emoji} {f.symbol}: {f.momentum:+.0%}")
+                tech_info = ""
+                if tech and tech.is_valid:
+                    ma_emoji = "📈" if tech.above_ma50 else "📉"
+                    tech_info = f" {ma_emoji}MM50:{tech.ma50_distance:+.0f}%"
+                lines.append(f"  {emoji} {f.symbol}: {f.momentum:+.0%}{tech_info}")
 
         # Signaux
         if signals:
             lines.append("\n<b>🚨 Signaux:</b>")
             for s in signals:
-                lines.append(f"  • {s.symbol}: {s.total_score:.1f}/10")
+                tech = technical_map.get(s.symbol)
+                rsi_info = f" RSI:{tech.rsi:.0f}" if (tech and tech.rsi) else ""
+                lines.append(f"  • {s.symbol}: {s.total_score:.1f}/10{rsi_info}")
         else:
             lines.append("\n<i>Pas de signal aujourd'hui</i>")
 
@@ -375,6 +428,8 @@ def main():
     parser.add_argument("--loop", action="store_true", help="Mode boucle")
     parser.add_argument("--interval", type=int, default=3600, help="Intervalle en secondes")
     parser.add_argument("--health", action="store_true", help="Vérifie l'état des services")
+    parser.add_argument("--validate-llm", action="store_true", help="Valide la qualité du LLM")
+    parser.add_argument("--llm-debug", action="store_true", help="Active les logs détaillés LLM")
     args = parser.parse_args()
 
     trader = PiTrader(test_mode=args.test)
@@ -387,6 +442,30 @@ def main():
             emoji = "✅" if ok else "❌"
             logger.info(f"   {emoji} {service}")
         return
+
+    # Validation LLM
+    if args.validate_llm:
+        logger.info("🧪 Validation LLM...")
+        if not ollama_client.is_available():
+            logger.error("❌ Ollama non disponible!")
+            return
+
+        result = ollama_client.validate_llm_quality()
+        logger.info(f"📊 Résultat: {result['score']} - {result['status']}")
+
+        for detail in result['details']:
+            emoji = "✅" if detail['correct'] else "❌"
+            logger.info(
+                f"   {emoji} {detail['text']}\n"
+                f"      Attendu: {detail['expected']}, Obtenu: {detail['got']} "
+                f"(conf: {detail['confidence']:.2f})"
+            )
+        return
+
+    # Mode debug LLM
+    if args.llm_debug:
+        ollama_client.debug_mode = True
+        logger.info("🔍 Mode debug LLM activé")
 
     # Warmup Ollama au démarrage
     trader.warmup()
