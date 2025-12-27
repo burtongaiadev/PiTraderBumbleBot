@@ -79,36 +79,46 @@ class TwelveDataClient:
         self._max_requests_per_minute = config.twelve_data.requests_per_minute
         self._min_delay = config.twelve_data.request_delay
 
-    def _enforce_rate_limit(self):
+    def _enforce_rate_limit(self, credits_used: int = 1):
         """
         Rate limiting strict avec fenêtre glissante
 
-        Assure qu'on ne dépasse jamais 8 req/min en:
+        Assure qu'on ne dépasse jamais 8 crédits/min en:
         1. Attendant le délai minimum entre requêtes
-        2. Vérifiant qu'on n'a pas dépassé 8 req dans la dernière minute
+        2. Vérifiant qu'on n'a pas dépassé 8 crédits dans la dernière minute
+
+        Note: Twelve Data compte 1 crédit par symbole dans les requêtes batch!
+        Une requête /quote?symbol=AAPL,MSFT,NVDA = 3 crédits
+
+        Args:
+            credits_used: Nombre de crédits que cette requête va utiliser
         """
         now = time.time()
 
         # 1. Nettoyer les requêtes de plus d'une minute
-        self._request_times = [t for t in self._request_times if now - t < 60]
+        self._request_times = [(t, c) for t, c in self._request_times if now - t < 60]
 
-        # 2. Si on a atteint la limite, attendre
-        if len(self._request_times) >= self._max_requests_per_minute:
-            oldest = self._request_times[0]
-            wait_time = 60 - (now - oldest) + 1  # +1s de marge
-            if wait_time > 0:
-                logger.warning(f"Rate limit reached, waiting {wait_time:.1f}s...")
-                time.sleep(wait_time)
-                now = time.time()
-                self._request_times = [t for t in self._request_times if now - t < 60]
+        # 2. Calculer les crédits utilisés dans la dernière minute
+        total_credits = sum(c for _, c in self._request_times)
 
-        # 3. Respecter le délai minimum entre requêtes
+        # 3. Si on va dépasser la limite, attendre
+        if total_credits + credits_used > self._max_requests_per_minute:
+            if self._request_times:
+                oldest_time = self._request_times[0][0]
+                wait_time = 60 - (now - oldest_time) + 2  # +2s de marge
+                if wait_time > 0:
+                    logger.warning(f"Rate limit: {total_credits}/{self._max_requests_per_minute} crédits, waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    now = time.time()
+                    self._request_times = [(t, c) for t, c in self._request_times if now - t < 60]
+
+        # 4. Respecter le délai minimum entre requêtes
         if self._request_times:
-            elapsed = now - self._request_times[-1]
+            elapsed = now - self._request_times[-1][0]
             if elapsed < self._min_delay:
                 time.sleep(self._min_delay - elapsed)
 
-        self._request_times.append(time.time())
+        self._request_times.append((time.time(), credits_used))
 
     @_twelve_data_cb
     @retry_with_backoff(
@@ -117,9 +127,16 @@ class TwelveDataClient:
         initial_delay=2.0,
         backoff_factor=2.0
     )
-    def _request(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Requête HTTP vers Twelve Data"""
-        self._enforce_rate_limit()
+    def _request(self, endpoint: str, params: Dict[str, Any], credits: int = 1) -> Dict[str, Any]:
+        """
+        Requête HTTP vers Twelve Data
+
+        Args:
+            endpoint: Endpoint API
+            params: Paramètres de la requête
+            credits: Nombre de crédits API utilisés (1 par symbole pour batch)
+        """
+        self._enforce_rate_limit(credits)
 
         params["apikey"] = self.api_key
         url = f"{self.base_url}{endpoint}"
@@ -127,8 +144,8 @@ class TwelveDataClient:
         response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         data = response.json()
-        
-        logger.debug(f"TwelveData {endpoint}: {params.get('symbol', 'unknown')}")
+
+        logger.debug(f"TwelveData {endpoint}: {params.get('symbol', 'unknown')} ({credits} crédits)")
 
         if "code" in data and data.get("status") == "error":
             raise ValueError(f"API Error: {data.get('message', 'Unknown error')}")
@@ -230,17 +247,20 @@ class TwelveDataClient:
         Récupère plusieurs quotes en une seule requête batch
 
         Utilise l'endpoint /quote avec symboles séparés par virgules.
-        1 requête au lieu de N requêtes = économie majeure d'API calls.
+        ATTENTION: Twelve Data compte 1 crédit par symbole dans la requête!
         """
         if not symbols:
             return {}
 
         results = {}
 
+        # Twelve Data compte 1 crédit par symbole, pas par requête
+        credits_needed = len(symbols)
+
         try:
             # Requête batch: /quote?symbol=AAPL,MSFT,GOOGL
             symbols_str = ",".join(symbols)
-            data = self._request("/quote", {"symbol": symbols_str})
+            data = self._request("/quote", {"symbol": symbols_str}, credits=credits_needed)
 
             # TwelveData batch response formats:
             # 1. Single symbol: {"symbol": "AAPL", "close": "150.00", ...}

@@ -26,6 +26,9 @@ class TelegramConfig:
     """Configuration Telegram"""
     bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+    # Channel ID optionnel - si défini, les signaux sont publiés dans le channel
+    # Utiliser @username (ex: @pitrader_signals) ou l'ID numérique (ex: -1001234567890)
+    channel_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHANNEL_ID", ""))
     enabled: bool = True
 
 

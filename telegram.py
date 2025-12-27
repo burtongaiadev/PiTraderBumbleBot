@@ -39,7 +39,7 @@ class TelegramBot:
     Bot Telegram pour PiTrader
 
     Gère:
-    - Envoi de notifications
+    - Envoi de notifications (DM ou channel)
     - Commandes interactives
     - Boutons inline pour notation
     """
@@ -47,11 +47,14 @@ class TelegramBot:
     def __init__(self):
         self.token = config.telegram.bot_token
         self.chat_id = config.telegram.chat_id
+        self.channel_id = config.telegram.channel_id  # Channel optionnel
         self.enabled = config.telegram.enabled and bool(self.token)
         self.base_url = f"https://api.telegram.org/bot{self.token}"
 
         if not self.enabled:
             logger.warning("Telegram not configured or disabled")
+        elif self.channel_id:
+            logger.info(f"Telegram channel mode: {self.channel_id}")
 
     @retry_with_backoff(
         exceptions=(requests.RequestException,),
@@ -84,7 +87,8 @@ class TelegramBot:
         self,
         text: str,
         parse_mode: str = "HTML",
-        reply_markup: Optional[Dict] = None
+        reply_markup: Optional[Dict] = None,
+        to_channel: bool = False
     ) -> bool:
         """
         Envoie un message texte
@@ -93,6 +97,7 @@ class TelegramBot:
             text: Texte du message (HTML supporté)
             parse_mode: Mode de parsing (HTML, Markdown)
             reply_markup: Boutons inline (optionnel)
+            to_channel: Force l'envoi au channel si configuré
 
         Returns:
             True si succès
@@ -101,9 +106,12 @@ class TelegramBot:
             logger.info(f"[Telegram disabled] Would send: {text[:100]}...")
             return False
 
+        # Utiliser le channel si configuré et demandé, sinon chat_id
+        target_id = self.channel_id if (to_channel and self.channel_id) else self.chat_id
+
         try:
             data = {
-                "chat_id": self.chat_id,
+                "chat_id": target_id,
                 "text": text,
                 "parse_mode": parse_mode
             }
@@ -145,7 +153,8 @@ class TelegramBot:
 <i>ID: {signal.id[:8]}</i>
 <i>Utilisez /review plus tard pour noter ce signal</i>"""
 
-        return self.send_message(text)
+        # Publier dans le channel si configuré
+        return self.send_message(text, to_channel=True)
 
     def send_review_list(self, signals: List[SignalRecord]) -> bool:
         """
@@ -326,7 +335,8 @@ Choisissez une note:"""
 
 <i>Première analyse en cours...</i>"""
 
-        return self.send_message(text)
+        # Publier dans le channel si configuré
+        return self.send_message(text, to_channel=True)
 
     def send_daily_summary(
         self,
@@ -368,7 +378,8 @@ Choisissez une note:"""
             for pick in top_picks[:3]:
                 text += f"• {pick}\n"
 
-        return self.send_message(text)
+        # Publier dans le channel si configuré
+        return self.send_message(text, to_channel=True)
 
 
 # Instance singleton

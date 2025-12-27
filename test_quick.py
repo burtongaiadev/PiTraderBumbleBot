@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-test_quick.py - Test rapide sur 3 actions
+test_quick.py - Test rapide sur 2 actions
+
+Crédits API Twelve Data utilisés:
+- 1 batch quote (2 symboles) = 2 crédits
+- 2 time_series (technique) = 2 crédits
+- 2 time_series (momentum) = 2 crédits
+Total: 6 crédits (limite: 8/min)
 """
 import logging
 import sys
@@ -20,13 +26,13 @@ from analysis.technical import technical_analyzer
 from analysis.sentiment import sentiment_analyzer
 from analysis.fundamentals import fundamentals_analyzer
 
-# 3 actions de test
-TEST_STOCKS = ["AAPL", "NVDA", "MSFT"]
+# 2 actions de test (6 crédits API < limite 8/min)
+TEST_STOCKS = ["AAPL", "NVDA"]
 
 
 def main():
     logger.info("=" * 50)
-    logger.info("🧪 Test rapide sur 3 actions")
+    logger.info("🧪 Test rapide sur 2 actions")
     logger.info("=" * 50)
 
     # 1. Test Twelve Data (quotes)
