@@ -81,17 +81,23 @@ All configuration in [config.py](config.py) using frozen dataclasses. Environmen
 - `OLLAMA_URL` - Local LLM endpoint (default: http://localhost:11434)
 
 Key config sections:
-- `config.watchlist` - 110 stocks: Top 50 S&P 500 + Top 30 CAC 40 + Top 30 DAX
+- `config.watchlist` - 80 stocks: Top 50 US + Top 15 CAC 40 + Top 15 DAX (optimized for free Twelve Data tier: 800 credits/day)
 - `config.ticker_names` - Mapping ticker → company name for better NewsAPI search
 - `config.news_api.domains` - Whitelisted financial news sources
 
+## API Credit Budget (Twelve Data Free Tier)
+
+- **Daily limit**: 800 credits
+- **Per-minute limit**: 8 credits
+- **Credit usage**: 1 credit per symbol (even in batch requests)
+- **Per analysis cycle**: ~160 credits (80 quotes + 80 time_series for fundamentals)
+- **Max cycles per day**: ~4-5 with safety margin
+
 ## Startup Notification
 
-On first run after a system reboot, PiTrader sends a Telegram notification with:
+PiTrader sends a Telegram notification at startup with:
 - System info (hostname, uptime, CPU temperature)
 - Configuration (watchlist count, Ollama status)
-
-Detection uses Linux `/proc/sys/kernel/random/boot_id` to identify new boots.
 
 ## Code Conventions
 
