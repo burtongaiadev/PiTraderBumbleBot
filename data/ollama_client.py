@@ -106,25 +106,25 @@ class OllamaClient:
     - Diagnostics pour valider qualité LLM
     """
 
-    # Prompts
-    SENTIMENT_PROMPT = """Analyze the sentiment of this financial news.
-Reply ONLY with a JSON in this exact format:
-{"sentiment": "POSITIF" or "NEGATIF" or "NEUTRE", "confidence": 0.0-1.0, "reason": "short explanation"}
+    # Prompts - Optimisés pour qwen2.5:1.5b
+    SENTIMENT_PROMPT = """You are a financial sentiment analyzer. Classify the news as POSITIF (good for stock), NEGATIF (bad for stock), or NEUTRE (neutral).
 
-News to analyze:
-{text}
+News: {text}
+
+Respond with ONLY this JSON format, nothing else:
+{{"sentiment": "POSITIF", "confidence": 0.8, "reason": "brief reason"}}
 
 JSON:"""
 
-    FED_TONE_PROMPT = """Analyze the Federal Reserve communication tone.
-HAWKISH = restrictive monetary policy, rate hikes, fighting inflation (negative for stocks)
-DOVISH = accommodative policy, rate cuts, supporting growth (positive for stocks)
+    FED_TONE_PROMPT = """You are a Federal Reserve policy analyzer. Classify the communication as:
+- HAWKISH: rate hikes, fighting inflation (bad for stocks)
+- DOVISH: rate cuts, supporting growth (good for stocks)
+- NEUTRAL: balanced, no clear direction
 
-Reply ONLY with a JSON:
-{"tone": "HAWKISH" or "DOVISH" or "NEUTRAL", "confidence": 0.0-1.0, "reason": "short explanation"}
+Text: {text}
 
-Text to analyze:
-{text}
+Respond with ONLY this JSON format, nothing else:
+{{"tone": "HAWKISH", "confidence": 0.8, "reason": "brief reason"}}
 
 JSON:"""
 
@@ -210,14 +210,81 @@ JSON:"""
             # Nettoyer la réponse
             response = response.strip()
 
-            # Chercher JSON dans la réponse
-            json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
+            # Log pour debug
+            if self.debug_mode:
+                logger.info(f"[PARSE] Raw response: {response[:300]}")
+
+            # Méthode 1: JSON direct
+            if response.startswith('{'):
+                try:
+                    # Trouver la fin du JSON (premier } après le début)
+                    brace_count = 0
+                    end_idx = 0
+                    for i, c in enumerate(response):
+                        if c == '{':
+                            brace_count += 1
+                        elif c == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                end_idx = i + 1
+                                break
+                    if end_idx > 0:
+                        return json.loads(response[:end_idx])
+                except json.JSONDecodeError:
+                    pass
+
+            # Méthode 2: Chercher JSON avec regex plus robuste
+            # Gère les guillemets dans les valeurs
+            json_match = re.search(r'\{[^{}]*"sentiment"[^{}]*\}', response, re.DOTALL | re.IGNORECASE)
             if json_match:
-                return json.loads(json_match.group())
+                try:
+                    return json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    pass
+
+            # Méthode 3: Chercher JSON avec "tone" (pour FED analysis)
+            json_match = re.search(r'\{[^{}]*"tone"[^{}]*\}', response, re.DOTALL | re.IGNORECASE)
+            if json_match:
+                try:
+                    return json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    pass
+
+            # Méthode 4: Extraction manuelle des champs
+            sentiment_match = re.search(r'"sentiment"\s*:\s*"([^"]+)"', response, re.IGNORECASE)
+            confidence_match = re.search(r'"confidence"\s*:\s*([0-9.]+)', response, re.IGNORECASE)
+            reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', response, re.IGNORECASE)
+
+            if sentiment_match:
+                result = {"sentiment": sentiment_match.group(1)}
+                if confidence_match:
+                    result["confidence"] = float(confidence_match.group(1))
+                if reason_match:
+                    result["reason"] = reason_match.group(1)
+                return result
+
+            # Méthode 5: Extraction du tone (FED)
+            tone_match = re.search(r'"tone"\s*:\s*"([^"]+)"', response, re.IGNORECASE)
+            if tone_match:
+                result = {"tone": tone_match.group(1)}
+                if confidence_match:
+                    result["confidence"] = float(confidence_match.group(1))
+                if reason_match:
+                    result["reason"] = reason_match.group(1)
+                return result
+
+            # Méthode 6: Détection par mots-clés si pas de JSON
+            response_upper = response.upper()
+            if "POSITIF" in response_upper or "POSITIVE" in response_upper:
+                return {"sentiment": "POSITIF", "confidence": 0.6, "reason": "Extracted from text"}
+            elif "NEGATIF" in response_upper or "NEGATIVE" in response_upper:
+                return {"sentiment": "NEGATIF", "confidence": 0.6, "reason": "Extracted from text"}
+            elif "NEUTRE" in response_upper or "NEUTRAL" in response_upper:
+                return {"sentiment": "NEUTRE", "confidence": 0.6, "reason": "Extracted from text"}
 
             return None
 
-        except json.JSONDecodeError as e:
+        except Exception as e:
             logger.warning(f"Failed to parse JSON: {e}")
             return None
 
@@ -555,9 +622,8 @@ JSON:"""
             ]
 
         # Construire prompt batch
-        batch_prompt = """Analyze the sentiment of each news headline below.
-For EACH headline, output a JSON on a separate line:
-{"id": N, "sentiment": "POSITIF" or "NEGATIF" or "NEUTRE", "confidence": 0.0-1.0}
+        batch_prompt = """You are a financial sentiment analyzer. For each headline, output ONE JSON per line.
+Use: POSITIF (good), NEGATIF (bad), or NEUTRE (neutral).
 
 Headlines:
 """
@@ -565,7 +631,12 @@ Headlines:
             truncated = text[:200] if text else ""
             batch_prompt += f"{i+1}. {truncated}\n"
 
-        batch_prompt += "\nJSON outputs (one per line):"
+        batch_prompt += """\nRespond with one JSON per line:
+{"id": 1, "sentiment": "POSITIF", "confidence": 0.8}
+{"id": 2, "sentiment": "NEGATIF", "confidence": 0.7}
+etc.
+
+JSON:"""
 
         try:
             response = self._generate(batch_prompt)
