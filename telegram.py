@@ -288,7 +288,7 @@ Choisissez une note:"""
 
     def send_startup_notification(self, watchlist_count: int, ollama_available: bool) -> bool:
         """
-        Envoie une notification de démarrage après reboot
+        Envoie une notification de démarrage
 
         Args:
             watchlist_count: Nombre d'actions surveillées
@@ -299,7 +299,6 @@ Choisissez une note:"""
         """
         from datetime import datetime
         import platform
-        import os
 
         # Récupérer uptime système
         try:
@@ -333,7 +332,41 @@ Choisissez une note:"""
 ├─ Actions: {watchlist_count}
 └─ {ollama_emoji} Ollama: {ollama_status}
 
-<i>Première analyse en cours...</i>"""
+<i>Analyse en cours...</i>"""
+
+        # Publier dans le channel si configuré
+        return self.send_message(text, to_channel=True)
+
+    def send_completion_notification(self, signals_count: int, duration_seconds: int, error: Optional[str] = None) -> bool:
+        """
+        Envoie une notification de fin d'analyse
+
+        Args:
+            signals_count: Nombre de signaux générés
+            duration_seconds: Durée de l'analyse en secondes
+            error: Message d'erreur si échec (optionnel)
+
+        Returns:
+            True si succès
+        """
+        from datetime import datetime
+
+        if error:
+            text = f"""❌ <b>PiTrader Terminé (Erreur)</b>
+{datetime.now().strftime('%d/%m/%Y %H:%M')}
+
+<b>Erreur:</b> <code>{error[:200]}</code>
+
+<i>Durée: {duration_seconds}s</i>"""
+        else:
+            signals_emoji = "🚨" if signals_count > 0 else "✅"
+            signals_text = f"{signals_count} signal(s) généré(s)" if signals_count > 0 else "Aucun signal"
+
+            text = f"""✅ <b>PiTrader Terminé</b>
+{datetime.now().strftime('%d/%m/%Y %H:%M')}
+
+{signals_emoji} {signals_text}
+⏱️ Durée: {duration_seconds}s"""
 
         # Publier dans le channel si configuré
         return self.send_message(text, to_channel=True)

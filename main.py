@@ -137,21 +137,37 @@ class PiTrader:
         return status
 
     def warmup(self):
-        """Pré-chauffe le modèle Ollama pour éviter le cold start"""
-        logger.info("🔥 Warmup Ollama...")
-        try:
-            if ollama_client.is_available():
-                # Petite requête pour charger le modèle en mémoire
-                ollama_client.analyze_sentiment("Warming up the model.")
-                logger.info("   → Ollama prêt")
-            else:
-                logger.warning("   → Ollama non disponible")
-        except Exception as e:
-            logger.warning(f"   → Warmup échoué: {e}")
+        """
+        Pré-chauffe le modèle Ollama pour éviter le cold start
 
-    def run_full_analysis(self):
-        """Exécute l'analyse complète"""
+        Attend indéfiniment jusqu'à ce qu'Ollama soit disponible.
+        """
+        logger.info("🔥 Warmup Ollama...")
+
+        # Attendre qu'Ollama soit disponible (attente infinie)
+        waited = 0
+        while not ollama_client.is_available():
+            logger.info(f"   → Attente Ollama... ({waited}s)")
+            time.sleep(10)
+            waited += 10
+
+        # Ollama disponible, charger le modèle
+        try:
+            ollama_client.analyze_sentiment("Warming up the model.")
+            logger.info("   → Ollama prêt")
+        except Exception as e:
+            logger.warning(f"   → Warmup sentiment échoué: {e}, mais Ollama est disponible")
+
+    def run_full_analysis(self) -> int:
+        """
+        Exécute l'analyse complète
+
+        Returns:
+            Nombre de signaux générés (ou -1 en cas d'erreur)
+        """
         start = datetime.now()
+        signals = []
+        error_msg = None
 
         logger.info("═" * 50)
         logger.info(f"🚀 PiTrader - Analyse de {len(config.watchlist)} actions")
@@ -195,11 +211,15 @@ class PiTrader:
 
         except Exception as e:
             logger.error(f"❌ Erreur: {e}")
+            error_msg = str(e)
             if not self.test_mode:
-                telegram_bot.send_error_alert(str(e))
+                telegram_bot.send_error_alert(error_msg)
 
         finally:
             gc.collect()
+
+        # Retourner le nombre de signaux (ou -1 si erreur)
+        return len(signals) if error_msg is None else -1
 
     def _generate_signals(
         self,
@@ -379,49 +399,6 @@ class PiTrader:
         telegram_bot.send_message(message)
 
 
-def is_first_run_after_boot() -> bool:
-    """
-    Vérifie si c'est le premier lancement après un reboot
-
-    Utilise un fichier marqueur avec le boot_id du système.
-    """
-    marker_file = config.runtime_dir / ".last_boot_id"
-
-    # Récupérer le boot_id actuel (Linux)
-    try:
-        with open('/proc/sys/kernel/random/boot_id', 'r') as f:
-            current_boot_id = f.read().strip()
-    except (FileNotFoundError, IOError):
-        # Pas sur Linux, utiliser l'uptime comme fallback
-        try:
-            with open('/proc/uptime', 'r') as f:
-                uptime = float(f.readline().split()[0])
-                # Si uptime < 10 min, considérer comme premier run
-                return uptime < 600
-        except (FileNotFoundError, IOError):
-            return False
-
-    # Vérifier si le boot_id a changé
-    try:
-        if marker_file.exists():
-            with open(marker_file, 'r') as f:
-                last_boot_id = f.read().strip()
-            if last_boot_id == current_boot_id:
-                return False
-    except IOError:
-        pass
-
-    # Sauvegarder le nouveau boot_id
-    try:
-        marker_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(marker_file, 'w') as f:
-            f.write(current_boot_id)
-    except IOError:
-        pass
-
-    return True
-
-
 def main():
     parser = argparse.ArgumentParser(description="PiTrader - Bot de signaux")
     parser.add_argument("--test", action="store_true", help="Mode test (pas d'envoi Telegram)")
@@ -467,16 +444,19 @@ def main():
         ollama_client.debug_mode = True
         logger.info("🔍 Mode debug LLM activé")
 
-    # Warmup Ollama au démarrage
+    # Warmup Ollama au démarrage (attend indéfiniment qu'Ollama soit prêt)
     trader.warmup()
 
-    # Notification Telegram au premier lancement après reboot
-    if not args.test and is_first_run_after_boot():
-        logger.info("📱 Premier lancement après reboot - Envoi notification...")
+    # Notification Telegram de démarrage (Ollama est forcément prêt ici)
+    if not args.test:
+        logger.info("📱 Envoi notification de démarrage...")
         telegram_bot.send_startup_notification(
             watchlist_count=len(config.watchlist),
-            ollama_available=ollama_client.is_available()
+            ollama_available=True
         )
+
+    # Exécution
+    start_time = time.time()
 
     if args.loop:
         logger.info(f"Mode boucle - intervalle: {args.interval}s")
@@ -489,7 +469,15 @@ def main():
                 logger.info("Arrêt demandé")
                 break
     else:
-        trader.run_full_analysis()
+        signals_count = trader.run_full_analysis()
+
+        # Notification Telegram de fin
+        if not args.test:
+            duration = int(time.time() - start_time)
+            if signals_count >= 0:
+                telegram_bot.send_completion_notification(signals_count, duration)
+            else:
+                telegram_bot.send_completion_notification(0, duration, error="Analyse échouée")
 
 
 if __name__ == "__main__":
