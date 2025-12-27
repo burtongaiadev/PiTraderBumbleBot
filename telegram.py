@@ -286,6 +286,67 @@ Choisissez une note:"""
         text = f"⚠️ <b>PiTrader Error</b>\n\n<code>{error[:500]}</code>"
         return self.send_message(text)
 
+    def send_debug_stock_analysis(
+        self,
+        symbol: str,
+        momentum: float,
+        ma50_distance: Optional[float] = None,
+        rsi: Optional[float] = None,
+        news_count: int = 0,
+        positive_count: int = 0,
+        negative_count: int = 0,
+        neutral_count: int = 0,
+        sentiment_score: float = 0.0,
+        sentiment_confidence: float = 0.0
+    ) -> bool:
+        """
+        Envoie les détails d'analyse d'une action (mode debug, DM uniquement)
+
+        Args:
+            symbol: Ticker de l'action
+            momentum: Performance 30 jours (%)
+            ma50_distance: Distance à la MA50 (%)
+            rsi: RSI actuel
+            news_count: Nombre de news analysées
+            positive_count: News positives
+            negative_count: News négatives
+            neutral_count: News neutres
+            sentiment_score: Score sentiment (0-3)
+            sentiment_confidence: Confiance Ollama (0-1)
+
+        Returns:
+            True si succès
+        """
+        # Emoji momentum
+        if momentum > 2:
+            mom_emoji = "🟢"
+        elif momentum < -2:
+            mom_emoji = "🔴"
+        else:
+            mom_emoji = "⚪"
+
+        # Emoji technique
+        if ma50_distance is not None:
+            tech_emoji = "📈" if ma50_distance > 0 else "📉"
+            ma_str = f"{ma50_distance:+.1f}%"
+        else:
+            tech_emoji = "❓"
+            ma_str = "N/A"
+
+        rsi_str = f"{rsi:.0f}" if rsi else "N/A"
+
+        # Sentiment
+        sent_str = f"{positive_count}+ {negative_count}- {neutral_count}~"
+        conf_str = f"{sentiment_confidence:.0%}" if sentiment_confidence > 0 else "N/A"
+
+        text = f"""{mom_emoji} <b>{symbol}</b> {momentum:+.1f}%
+{tech_emoji} MA50:{ma_str} | RSI:{rsi_str}
+📰 {news_count} news ({sent_str})
+🤖 Sentiment: {sentiment_score:.1f}/3 (conf: {conf_str})"""
+
+        # Envoyer au DM (chat_id), pas au channel
+        return self.send_message(text, to_channel=False)
+
     def send_startup_notification(self, watchlist_count: int, ollama_available: bool) -> bool:
         """
         Envoie une notification de démarrage
@@ -334,8 +395,8 @@ Choisissez une note:"""
 
 <i>Analyse en cours...</i>"""
 
-        # Publier dans le channel si configuré
-        return self.send_message(text, to_channel=True)
+        # Envoyer au DM (pas au channel)
+        return self.send_message(text, to_channel=False)
 
     def send_completion_notification(self, signals_count: int, duration_seconds: int, error: Optional[str] = None) -> bool:
         """
@@ -368,8 +429,8 @@ Choisissez une note:"""
 {signals_emoji} {signals_text}
 ⏱️ Durée: {duration_seconds}s"""
 
-        # Publier dans le channel si configuré
-        return self.send_message(text, to_channel=True)
+        # Envoyer au DM (pas au channel)
+        return self.send_message(text, to_channel=False)
 
     def send_daily_summary(
         self,

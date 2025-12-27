@@ -96,8 +96,9 @@ logger = logging.getLogger(__name__)
 class PiTrader:
     """Bot de trading Top-Down"""
 
-    def __init__(self, test_mode: bool = False):
+    def __init__(self, test_mode: bool = False, debug_telegram: bool = False):
         self.test_mode = test_mode
+        self.debug_telegram = debug_telegram
 
     def health_check(self) -> dict:
         """Vérifie l'état de tous les services"""
@@ -195,6 +196,10 @@ class PiTrader:
             # Filtrer: garder seulement ceux au-dessus de MM50
             bullish_symbols = [t.symbol for t in technicals if t.is_valid and t.above_ma50][:5]
             sentiments = sentiment_analyzer.analyze_multiple(bullish_symbols) if bullish_symbols else []
+
+            # Envoyer debug Telegram pour chaque action analysée (top 10)
+            if self.debug_telegram and not self.test_mode:
+                self._send_debug_analysis(fundamentals[:10], technicals, sentiments)
 
             # Phase 5: Signaux
             logger.info("🎯 Phase 5: Génération Signaux...")
@@ -396,7 +401,38 @@ class PiTrader:
             lines.append("\n<i>Pas de signal aujourd'hui</i>")
 
         message = "\n".join(lines)
-        telegram_bot.send_message(message)
+        # Résumé au DM, pas au channel
+        telegram_bot.send_message(message, to_channel=False)
+
+    def _send_debug_analysis(
+        self,
+        fundamentals: List[FundamentalScore],
+        technicals: List[TechnicalScore],
+        sentiments: List[SentimentScore]
+    ):
+        """Envoie les détails de chaque action analysée au bot (DM)"""
+        technical_map = {t.symbol: t for t in technicals}
+        sentiment_map = {s.symbol: s for s in sentiments}
+
+        for fund in fundamentals:
+            if not fund.is_valid:
+                continue
+
+            tech = technical_map.get(fund.symbol)
+            sent = sentiment_map.get(fund.symbol)
+
+            telegram_bot.send_debug_stock_analysis(
+                symbol=fund.symbol,
+                momentum=fund.momentum * 100,  # Convertir en %
+                ma50_distance=tech.ma50_distance if (tech and tech.is_valid) else None,
+                rsi=tech.rsi if (tech and tech.is_valid) else None,
+                news_count=sent.articles_analyzed if sent else 0,
+                positive_count=sent.positive_count if sent else 0,
+                negative_count=sent.negative_count if sent else 0,
+                neutral_count=sent.neutral_count if sent else 0,
+                sentiment_score=sent.total_score if sent else 0.0,
+                sentiment_confidence=sent.avg_confidence if sent else 0.0
+            )
 
 
 def main():
@@ -407,9 +443,10 @@ def main():
     parser.add_argument("--health", action="store_true", help="Vérifie l'état des services")
     parser.add_argument("--validate-llm", action="store_true", help="Valide la qualité du LLM")
     parser.add_argument("--llm-debug", action="store_true", help="Active les logs détaillés LLM")
+    parser.add_argument("--debug-telegram", action="store_true", help="Envoie détails de chaque action au bot (DM)")
     args = parser.parse_args()
 
-    trader = PiTrader(test_mode=args.test)
+    trader = PiTrader(test_mode=args.test, debug_telegram=args.debug_telegram)
 
     # Health check
     if args.health:
